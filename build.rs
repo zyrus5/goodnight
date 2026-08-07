@@ -17,6 +17,14 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let frontend_dir = manifest_dir.join("frontend");
 
+    if env::var("GOODNIGHT_SKIP_FRONTEND_BUILD").as_deref() == Ok("1") {
+        assert!(
+            frontend_dir.join("dist/index.html").is_file(),
+            "GOODNIGHT_SKIP_FRONTEND_BUILD=1 requires frontend/dist/index.html"
+        );
+        return;
+    }
+
     if !frontend_dir.join("node_modules").is_dir() {
         run_npm(&frontend_dir, &["ci"], "install frontend dependencies");
     }

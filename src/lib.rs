@@ -19,7 +19,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
 pub async fn run() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
+    load_dotenv();
     init_tracing();
     let config = Arc::new(config::Config::from_env()?);
     let crypto = Arc::new(crypto::Keyring::from_env()?);
@@ -47,6 +47,16 @@ pub async fn run() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("API server stopped unexpectedly")
+}
+fn load_dotenv() {
+    if dotenvy::dotenv().is_ok() {
+        return;
+    }
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(directory) = executable.parent()
+    {
+        dotenvy::from_path(directory.join(".env")).ok();
+    }
 }
 fn init_tracing() {
     tracing_subscriber::registry()

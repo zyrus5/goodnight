@@ -27,7 +27,7 @@ npm run dev
 
 - 所有 Jenkins 使用 `JENKINS_USERNAME` / `JENKINS_PASSWORD` 公共账户。
 - 环境中配置的 Jenkins 地址只需使用 `http` 或 `https`；保存时平台会请求 `<Jenkins 地址>/api/json` 验证连通性和公共账户权限。
-- 生产环境 Jenkins 强制 HTTPS，Jenkins 证书必须通过正常的 TLS 校验。
+- Jenkins 地址支持 `http` 或 `https`，证书必须通过正常的 TLS 校验。
 - `APP_ENCRYPTION_KEYS` 格式为 `版本:Base64密钥`，逗号分隔；第一项是写入密钥。生成新密钥可运行 `openssl rand -base64 32`，轮换时把新版本放在最前面并保留旧版本供解密。
 - 生产部署应将 `SESSION_SECURE=true`，并通过 Secret 管理器注入密码和密钥。
 
@@ -46,6 +46,8 @@ cargo test
 cd frontend && npm run typecheck && npm run build
 cargo build --release
 ```
+
+发布版可执行文件已经嵌入前端资源。应用启动时会先从当前工作目录或其父目录查找 `.env`，未找到时再读取可执行文件同目录下的 `.env`；也可以直接通过系统环境变量提供配置。系统环境变量优先于 `.env`。`APP_ENCRYPTION_KEYS` 始终必填，首次启动空数据库时还必须配置 `BOOTSTRAP_ADMIN_USERNAME` 与 `BOOTSTRAP_ADMIN_PASSWORD`。
 
 生产构建会把 `frontend/dist` 嵌入 Rust 二进制。健康检查位于 `/api/health`；Prometheus 文本指标位于 `/api/metrics`，请求需携带 `Authorization: Bearer <METRICS_TOKEN>`。
 
