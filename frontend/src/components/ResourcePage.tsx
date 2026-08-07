@@ -284,7 +284,7 @@ export function ResourcePage({ config }: { config: ResourceConfig }) {
                               管理Job
                             </button>
                           )}
-                          {!row.is_public && config.memberRoles?.map((memberRole) => (
+                          {!row.is_public && mutationVisible && config.memberRoles?.map((memberRole) => (
                             <button
                               key={memberRole.role}
                               className="link-button"

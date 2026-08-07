@@ -133,7 +133,10 @@ pub fn router(state: AppState) -> Router {
         .route("/tasks/{id}/toggle", post(routes::tasks::toggle))
         .route("/tasks/{id}/run", post(routes::tasks::run))
         .route("/executions", get(routes::tasks::executions))
-        .route("/executions/{id}", get(routes::tasks::execution_detail))
+        .route(
+            "/executions/{id}",
+            get(routes::tasks::execution_detail).delete(routes::tasks::delete_execution),
+        )
         .route("/executions/{id}/stop", post(routes::tasks::stop_execution))
         .route("/executions/{id}/copy", post(routes::tasks::copy_execution))
         .route(

@@ -328,6 +328,43 @@ pub async fn execution_detail(
     let nodes=sqlx::query_as::<_,NodeExecutionView>("SELECT id,execution_id,node_key,node_name,dependencies,status,queue_id,queue_url,build_number,build_url,blocking_reason,error_summary,submitted_at,started_at,finished_at,updated_at FROM gd_node_executions WHERE execution_id=$1 ORDER BY submitted_at NULLS FIRST,node_name").bind(id).fetch_all(&s.db).await?;
     Ok(Json(json!({"execution":execution,"nodes":nodes})))
 }
+pub async fn delete_execution(
+    State(s): State<AppState>,
+    u: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<axum::http::StatusCode> {
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM gd_executions WHERE id=$1 AND ($2::uuid IS NULL OR user_id=$2)",
+    )
+    .bind(id)
+    .bind(if u.is_admin { None } else { Some(u.id) })
+    .fetch_optional(&s.db)
+    .await?
+    .ok_or_else(|| ApiError::not_found("执行记录不存在"))?;
+    if !matches!(status.as_str(), "SUCCESS" | "FAILED" | "CANCELED") {
+        return Err(ApiError::conflict("执行尚未结束，不能删除"));
+    }
+    let mut tx = s.db.begin().await?;
+    sqlx::query("DELETE FROM gd_node_executions WHERE execution_id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM gd_executions WHERE id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    audit::record(
+        &s.db,
+        Some(u.id),
+        "DELETE",
+        "EXECUTION",
+        Some(id),
+        json!({"status":status}),
+    )
+    .await;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
 pub async fn stop_execution(
     State(s): State<AppState>,
     u: CurrentUser,

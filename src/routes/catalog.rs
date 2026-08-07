@@ -256,6 +256,7 @@ pub async fn update_component(
     Path(id): Path<Uuid>,
     Json(i): Json<ComponentInput>,
 ) -> ApiResult<Json<ComponentView>> {
+    u.require_resource_maintainer()?;
     component_permission(&s.db, &u, id, true).await?;
     let v = i
         .version
@@ -301,6 +302,7 @@ pub async fn update_component_members(
     Path((id, role)): Path<(Uuid, String)>,
     Json(input): Json<ComponentMembersInput>,
 ) -> ApiResult<Json<ComponentView>> {
+    u.require_resource_maintainer()?;
     component_permission(&s.db, &u, id, true).await?;
     let is_public: bool = sqlx::query_scalar("SELECT is_public FROM gd_components WHERE id=$1")
         .bind(id)

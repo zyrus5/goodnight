@@ -98,7 +98,7 @@ export function TaskEditorPage() {
       (!deploymentDomainFilter ||
         job.deployment_domain === deploymentDomainFilter) &&
       (!environmentFilter || job.environment_id === environmentFilter) &&
-      `${job.display_name} ${job.instance_name} ${job.job_full_name}`
+      `${job.display_name} ${job.instance_name} ${job.job_full_name} ${job.customer_name} ${job.environment_name} ${job.deployment_domain}`
         .toLowerCase()
         .includes(jobQuery.trim().toLowerCase()),
   );
@@ -123,6 +123,7 @@ export function TaskEditorPage() {
   }
   function drop(event: DragEvent<HTMLElement>, dependencies: string[]) {
     event.preventDefault();
+    event.stopPropagation();
     const job = jobs.find(
       (item) =>
         item.id === event.dataTransfer.getData("application/x-goodnight-job"),
@@ -326,11 +327,15 @@ export function TaskEditorPage() {
                 <div>
                   <strong>{String(job.display_name)}</strong>
                   <small>
-                    {String(job.component_name)} ·{" "}
-                    {String(job.environment_name)}
+                    客户：{String(job.customer_name ?? "—")} 环境：
+                    {job.deployment_domain
+                      ? `${String(job.deployment_domain)}-`
+                      : ""}
+                    {String(job.environment_name ?? "—")}
                   </small>
                   <small>
-                    {String(job.instance_name)} · {String(job.job_full_name)}
+                    {String(job.component_name)} · {String(job.instance_name)} ·{" "}
+                    {String(job.job_full_name)}
                   </small>
                 </div>
                 <b>＋</b>
@@ -358,7 +363,19 @@ export function TaskEditorPage() {
           ) : (
             <div className="dag-editor">
               {levels.map((level, index) => (
-                <div className="dag-level" key={index}>
+                <div
+                  className="dag-level"
+                  key={index}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) =>
+                    drop(
+                      event,
+                      index === 0
+                        ? []
+                        : levels[index - 1].map((node) => node.key),
+                    )
+                  }
+                >
                   <div className="level-label">
                     层级 {index + 1} ·{" "}
                     {level.length > 1 ? "并行执行" : "单节点"}
@@ -377,8 +394,11 @@ export function TaskEditorPage() {
                   >
                     ＋ 拖到这里，与本层并行
                   </div>
-                  {level.map((node) => (
-                    <div className="node-card" key={node.key}>
+                  {level.map((node) => {
+                    const job = jobs.find(
+                      (item) => item.id === node.job_config_id,
+                    );
+                    return <div className="node-card" key={node.key}>
                       <div className="node-head">
                         <span>▶</span>
                         <input
@@ -398,6 +418,22 @@ export function TaskEditorPage() {
                           ×
                         </button>
                       </div>
+                      {job && (
+                        <div className="node-context">
+                          <span>
+                            客户：{String(job.customer_name ?? "—")} 环境：
+                            {job.deployment_domain
+                              ? `${String(job.deployment_domain)}-`
+                              : ""}
+                            {String(job.environment_name ?? "—")}
+                          </span>
+                          <small>
+                            {String(job.component_name)} ·{" "}
+                            {String(job.instance_name)} ·{" "}
+                            {String(job.job_full_name)}
+                          </small>
+                        </div>
+                      )}
                       <div className="node-fields">
                         <label>
                           前置节点（可多选）
@@ -450,8 +486,8 @@ export function TaskEditorPage() {
                           />
                         </label>
                       </div>
-                    </div>
-                  ))}
+                    </div>;
+                  })}
                 </div>
               ))}
               <div
