@@ -1,35 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect,useState } from 'react'
+import { Link } from 'react-router-dom'
+import { http } from '../lib/http'
 
-import { getHealth, type HealthResponse } from '../services/system'
-import { useAppStore } from '../stores/app'
-
-export function HomePage() {
-  const visits = useAppStore((state) => state.visits)
-  const incrementVisits = useAppStore((state) => state.incrementVisits)
-  const [health, setHealth] = useState<HealthResponse | null>(null)
-
-  useEffect(() => {
-    incrementVisits()
-    void getHealth().then(setHealth).catch(() => setHealth(null))
-  }, [incrementVisits])
-
-  return (
-    <section className="hero">
-      <p className="eyebrow">React + Axum + PostgreSQL</p>
-      <h1>工程脚手架已启动</h1>
-      <p>路由、状态管理与 HTTP 客户端均已就绪。</p>
-      <div className="status-grid">
-        <div>
-          <span>前端访问次数</span>
-          <strong>{visits}</strong>
-        </div>
-        <div>
-          <span>API / 数据库</span>
-          <strong>
-            {health ? `${health.service} / ${health.database}` : '未连接'}
-          </strong>
-        </div>
-      </div>
-    </section>
-  )
-}
+interface Stats{tasks:number;running:number;failed_24h:number}
+export function HomePage(){const[s,setS]=useState<Stats>();useEffect(()=>{void http.get<Stats>('/dashboard').then(r=>setS(r.data))},[]);const cards=[['已配置任务',s?.tasks??'—','⌘','blue'],['正在执行',s?.running??'—','▶','green'],['24h 失败',s?.failed_24h??'—','!','red']];return <><div className="page-heading"><div><p className="eyebrow">OPERATION OVERVIEW</p><h1>发布运行总览</h1><p>集中关注任务和执行情况。</p></div><Link className="primary button" to="/tasks/new">＋ 创建任务</Link></div><div className="metric-grid">{cards.map(([name,value,icon,color])=><div className="metric-card" key={String(name)}><span className={`metric-icon ${color}`}>{icon}</span><div><small>{name}</small><strong>{value}</strong></div></div>)}</div><section className="panel getting-started"><div><p className="eyebrow">QUICK START</p><h2>配置发布链路</h2><p>从配置环境到创建编排任务，只需完成三个步骤。</p></div><div className="steps">{[['01','创建客户与环境','/customers'],['02','绑定组件并管理 Job','/instances'],['03','编排并运行任务','/tasks']].map(([n,t,to])=><Link to={to} key={n}><span>{n}</span><strong>{t}</strong><b>→</b></Link>)}</div></section></>}

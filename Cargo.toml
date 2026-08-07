@@ -5,14 +5,30 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
+aes-gcm = "0.10"
 anyhow = "1"
+argon2 = "0.5"
 axum = "0.8.9"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = { version = "0.10", features = ["serde"] }
+cron = "0.15"
 dotenvy = "0.15"
+futures = "0.3"
+http = "1"
 mime_guess = "2"
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
-sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate", "macros"] }
+subtle = "2"
+thiserror = "2"
 tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
