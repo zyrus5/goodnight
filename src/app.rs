@@ -70,6 +70,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/components/{id}", put(routes::catalog::update_component))
         .route(
+            "/components/{id}/members/{role}",
+            put(routes::catalog::update_component_members),
+        )
+        .route(
             "/environments",
             get(routes::catalog::environments).post(routes::catalog::create_environment),
         )
@@ -91,7 +95,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/component-instances/{id}",
-            put(routes::catalog::update_instance).delete(routes::catalog::delete_instance),
+            axum::routing::delete(routes::catalog::delete_instance),
         )
         .route(
             "/component-instances/{id}/jobs/discover",

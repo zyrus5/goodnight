@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { errorMessage, http } from "../lib/http";
 import { SearchableSelect } from "./SearchableSelect";
+import { useAppStore } from "../stores/app";
 import {
   createResource,
   deleteResource,
@@ -61,9 +62,19 @@ export interface ResourceConfig {
   deletable?: boolean;
   manageJobs?: boolean;
   createDisabled?: boolean;
+  editDisabled?: boolean;
+  maintainerOnly?: boolean;
+  memberRoles?: { role: "DEVELOPER" | "TESTER"; label: string; field: string }[];
 }
 
 export function ResourcePage({ config }: { config: ResourceConfig }) {
+  const user = useAppStore((state) => state.user);
+  const canMaintain = Boolean(
+    user?.is_admin || ["ADMIN", "OPS", "DEVELOPER"].includes(user?.role ?? ""),
+  );
+  const mutationVisible =
+    (!config.adminOnly || Boolean(user?.is_admin)) &&
+    (!config.maintainerOnly || canMaintain);
   const [data, setData] = useState<Resource[]>([]);
   const [total, setTotal] = useState(0);
   const [q, setQ] = useState("");
@@ -79,6 +90,9 @@ export function ResourcePage({ config }: { config: ResourceConfig }) {
   const [copying, setCopying] = useState(false);
   const [associating, setAssociating] = useState<Resource | undefined>();
   const [managingJobs, setManagingJobs] = useState<Resource | undefined>();
+  const [memberEditing, setMemberEditing] = useState<
+    { row: Resource; role: "DEVELOPER" | "TESTER"; label: string; field: string } | undefined
+  >();
   const [error, setError] = useState("");
   const reload = () => {
     setLoading(true);
@@ -136,7 +150,7 @@ export function ResourcePage({ config }: { config: ResourceConfig }) {
           <h1>{config.title}</h1>
           <p>{config.description}</p>
         </div>
-        {config.fields && !config.createDisabled && (
+        {config.fields && !config.createDisabled && mutationVisible && (
           <button className="primary" onClick={openCreate}>
             ＋ {config.createLabel ?? "新建"}
           </button>
@@ -205,7 +219,7 @@ export function ResourcePage({ config }: { config: ResourceConfig }) {
                 {config.columns.map((c) => (
                   <th key={c.key}>{c.label}</th>
                 ))}
-                {config.fields && <th>操作</th>}
+                {(config.fields || config.manageJobs || config.deletable || config.memberRoles) && <th>操作</th>}
               </tr>
             </thead>
             <tbody>
@@ -231,10 +245,10 @@ export function ResourcePage({ config }: { config: ResourceConfig }) {
                           : render(row[c.key])}
                       </td>
                     ))}
-                    {config.fields && (
+                    {(config.fields || config.manageJobs || config.deletable || config.memberRoles) && (
                       <td>
                         <div className="row-actions">
-                          <button
+                          {!config.editDisabled && mutationVisible && <button
                             className="link-button"
                             onClick={() => {
                               setCopying(false);
@@ -242,8 +256,8 @@ export function ResourcePage({ config }: { config: ResourceConfig }) {
                             }}
                           >
                             编辑
-                          </button>
-                          {config.copyable && (
+                          </button>}
+                          {config.copyable && mutationVisible && (
                             <button
                               className="link-button"
                               onClick={() => {
@@ -254,7 +268,7 @@ export function ResourcePage({ config }: { config: ResourceConfig }) {
                               复制
                             </button>
                           )}
-                          {config.associateComponents && (
+                          {config.associateComponents && mutationVisible && (
                             <button
                               className="link-button"
                               onClick={() => setAssociating(row)}
@@ -270,7 +284,16 @@ export function ResourcePage({ config }: { config: ResourceConfig }) {
                               管理Job
                             </button>
                           )}
-                          {config.deletable && (
+                          {!row.is_public && config.memberRoles?.map((memberRole) => (
+                            <button
+                              key={memberRole.role}
+                              className="link-button"
+                              onClick={() => setMemberEditing({ row, ...memberRole })}
+                            >
+                              {memberRole.label}
+                            </button>
+                          ))}
+                          {config.deletable && mutationVisible && (
                             <button
                               className="link-button danger-text"
                               onClick={() => void remove(row)}
@@ -328,8 +351,68 @@ export function ResourcePage({ config }: { config: ResourceConfig }) {
           onClose={() => setManagingJobs(undefined)}
         />
       )}
+      {memberEditing && (
+        <ComponentMembersDialog
+          value={memberEditing}
+          onClose={() => setMemberEditing(undefined)}
+          onSaved={() => { setMemberEditing(undefined); reload(); }}
+        />
+      )}
     </>
   );
+}
+
+function ComponentMembersDialog({
+  value,
+  onClose,
+  onSaved,
+}: {
+  value: { row: Resource; role: "DEVELOPER" | "TESTER"; label: string; field: string };
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [users, setUsers] = useState<Resource[]>([]);
+  const [selected, setSelected] = useState<string[]>(
+    Array.isArray(value.row[value.field]) ? (value.row[value.field] as string[]) : [],
+  );
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [leftQuery, setLeftQuery] = useState("");
+  const [rightQuery, setRightQuery] = useState("");
+  useEffect(() => {
+    void getPage<Resource>("/users", "", 1, { page_size: 100 })
+      .then((page) => setUsers(page.items.filter((item) => item.is_active !== false)))
+      .catch((err) => setError(errorMessage(err)));
+  }, []);
+  async function save() {
+    setBusy(true);
+    setError("");
+    try {
+      await http.put(`/components/${value.row.id}/members/${value.role}`, { user_ids: selected });
+      onSaved();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+  const matches = (item: Resource, query: string) =>
+    `${String(item.display_name)} ${String(item.username)} ${String(item.role)}`
+      .toLowerCase().includes(query.trim().toLowerCase());
+  const available = users.filter((item) => !selected.includes(item.id) && matches(item, leftQuery));
+  const added = users.filter((item) => selected.includes(item.id) && matches(item, rightQuery));
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className="modal transfer-modal">
+      <div className="modal-head"><div><p className="eyebrow">COMPONENT MEMBERS</p><h2>{value.label} · {String(value.row.name)}</h2></div><button type="button" onClick={onClose}>×</button></div>
+      <div className="transfer-box">
+        <section><header><strong>用户列表</strong><span>{available.length}</span></header><div className="transfer-search">⌕<input value={leftQuery} onChange={(event) => setLeftQuery(event.target.value)} placeholder="搜索用户" /></div><div className="transfer-list">{available.map((item) => <button type="button" key={item.id} onClick={() => setSelected((current) => [...current, item.id])}><span><strong>{String(item.display_name)}</strong><small>{String(item.username)} · {String(item.role)}</small></span><b>＋</b></button>)}{available.length === 0 && <div className="association-empty">暂无可添加用户</div>}</div></section>
+        <div className="transfer-arrows"><span>→</span><span>←</span></div>
+        <section><header><strong>已添加用户</strong><span>{added.length}</span></header><div className="transfer-search">⌕<input value={rightQuery} onChange={(event) => setRightQuery(event.target.value)} placeholder="搜索已添加用户" /></div><div className="transfer-list">{added.map((item) => <button type="button" key={item.id} onClick={() => setSelected((current) => current.filter((id) => id !== item.id))}><span><strong>{String(item.display_name)}</strong><small>{String(item.username)} · {String(item.role)}</small></span><b>×</b></button>)}{added.length === 0 && <div className="association-empty">暂未添加用户</div>}</div></section>
+      </div>
+      {error && <div className="alert error">{error}</div>}
+      <div className="modal-actions"><button type="button" onClick={onClose}>取消</button><button type="button" className="primary" disabled={busy} onClick={() => void save()}>{busy ? "保存中…" : "保存"}</button></div>
+    </div>
+  </div>;
 }
 
 function ResourceDialog({
@@ -460,6 +543,7 @@ function EnvironmentAssociationDialog({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const navigate = useNavigate();
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [components, setComponents] = useState<Resource[]>([]);
   const [query, setQuery] = useState("");
@@ -534,7 +618,6 @@ function EnvironmentAssociationDialog({
             component_id: row.componentId,
             environment_id: environment.id,
             folder_full_name: folderFullName(row.folder) || row.folder.name,
-            folder_path: folderFullName(row.folder) || row.folder.name,
             folder_url: row.folder.url,
             notes: "",
             custom_fields: { folder_name: row.folder.name },
@@ -542,6 +625,7 @@ function EnvironmentAssociationDialog({
         ),
       );
       onSaved();
+      navigate("/instances");
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -1323,5 +1407,5 @@ export const status = (value: unknown) =>
   );
 
 function isSearchableRelation(key: string) {
-  return key === "component_id" || key === "customer_id";
+  return key === "component_id" || key === "customer_id" || key === "owner_id";
 }

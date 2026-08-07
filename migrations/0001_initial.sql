@@ -6,6 +6,7 @@ CREATE TABLE gd_users
     username      varchar(80)  NOT NULL UNIQUE,
     display_name  varchar(120) NOT NULL,
     password_hash text         NOT NULL,
+    role          varchar(20)  NOT NULL DEFAULT 'TESTER' CHECK (role IN ('ADMIN', 'OPS', 'DEVELOPER', 'TESTER')),
     is_admin      boolean      NOT NULL DEFAULT false,
     is_active     boolean      NOT NULL DEFAULT true,
     version       integer      NOT NULL DEFAULT 1,
@@ -40,6 +41,7 @@ CREATE TABLE gd_components
     id         uuid PRIMARY KEY      DEFAULT gen_random_uuid(),
     code       varchar(64)  NOT NULL UNIQUE,
     name       varchar(160) NOT NULL,
+    is_public  boolean      NOT NULL DEFAULT false,
     is_active  boolean      NOT NULL DEFAULT true,
     version    integer      NOT NULL DEFAULT 1,
     created_at timestamptz  NOT NULL DEFAULT now(),
@@ -50,9 +52,10 @@ CREATE TABLE gd_component_members
 (
     component_id uuid        NOT NULL,
     user_id      uuid        NOT NULL,
-    role         varchar(20) NOT NULL CHECK (role IN ('MAINTAINER', 'TESTER')),
+    role         varchar(20) NOT NULL CHECK (role IN ('OWNER', 'DEVELOPER', 'TESTER')),
     PRIMARY KEY (component_id, user_id, role)
 );
+CREATE UNIQUE INDEX component_single_owner_idx ON gd_component_members (component_id) WHERE role = 'OWNER';
 
 CREATE TABLE gd_environments
 (
@@ -63,13 +66,8 @@ CREATE TABLE gd_environments
     name                    varchar(160) NOT NULL,
     jenkins_url             text         NOT NULL,
     request_timeout_seconds integer      NOT NULL DEFAULT 10 CHECK (request_timeout_seconds BETWEEN 1 AND 300),
-    allow_invalid_certs     boolean      NOT NULL DEFAULT false,
     notes                   text         NOT NULL DEFAULT '',
     is_active               boolean      NOT NULL DEFAULT false,
-    connection_status       varchar(20)  NOT NULL DEFAULT 'UNTESTED' CHECK (connection_status IN ('UNTESTED', 'CONNECTED', 'ERROR')),
-    last_checked_at         timestamptz,
-    last_success_at         timestamptz,
-    last_error              text,
     version                 integer      NOT NULL DEFAULT 1,
     created_at              timestamptz  NOT NULL DEFAULT now(),
     updated_at              timestamptz  NOT NULL DEFAULT now(),
@@ -83,12 +81,10 @@ CREATE TABLE gd_component_instances
     component_id     uuid         NOT NULL,
     environment_id   uuid         NOT NULL,
     folder_full_name text         NOT NULL,
-    folder_path      text         NOT NULL,
     folder_url       text,
     status           varchar(20)  NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'ERROR')),
     notes            text         NOT NULL DEFAULT '',
     custom_fields    jsonb        NOT NULL DEFAULT '[]'::jsonb,
-    last_synced_at   timestamptz,
     version          integer      NOT NULL DEFAULT 1,
     created_at       timestamptz  NOT NULL DEFAULT now(),
     updated_at       timestamptz  NOT NULL DEFAULT now(),
@@ -99,6 +95,7 @@ CREATE TABLE gd_component_instances
 CREATE TABLE gd_job_configs
 (
     id                    uuid PRIMARY KEY      DEFAULT gen_random_uuid(),
+    user_id               uuid         NOT NULL,
     component_instance_id uuid         NOT NULL,
     display_name          varchar(160) NOT NULL,
     description           text         NOT NULL DEFAULT '',
@@ -109,8 +106,8 @@ CREATE TABLE gd_job_configs
     version               integer      NOT NULL DEFAULT 1,
     created_at            timestamptz  NOT NULL DEFAULT now(),
     updated_at            timestamptz  NOT NULL DEFAULT now(),
-    UNIQUE (component_instance_id, display_name),
-    UNIQUE (component_instance_id, job_full_name)
+    UNIQUE (user_id, component_instance_id, display_name),
+    UNIQUE (user_id, component_instance_id, job_full_name)
 );
 
 CREATE TABLE gd_job_config_versions
@@ -129,6 +126,7 @@ CREATE TABLE gd_job_config_versions
 CREATE TABLE gd_tasks
 (
     id              uuid PRIMARY KEY      DEFAULT gen_random_uuid(),
+    user_id         uuid         NOT NULL,
     name            varchar(200) NOT NULL,
     description     text         NOT NULL DEFAULT '',
     creator_id      uuid         NOT NULL,
@@ -141,8 +139,11 @@ CREATE TABLE gd_tasks
     version         integer      NOT NULL DEFAULT 1,
     next_run_at     timestamptz,
     created_at      timestamptz  NOT NULL DEFAULT now(),
-    updated_at      timestamptz  NOT NULL DEFAULT now()
+    updated_at      timestamptz  NOT NULL DEFAULT now(),
+    is_deleted      boolean      NOT NULL DEFAULT false
 );
+CREATE INDEX gd_tasks_active_updated_idx ON gd_tasks (updated_at DESC) WHERE NOT is_deleted;
+CREATE INDEX gd_tasks_user_idx ON gd_tasks (user_id, updated_at DESC) WHERE NOT is_deleted;
 
 CREATE TABLE gd_task_versions
 (
@@ -158,6 +159,7 @@ CREATE TABLE gd_task_versions
 CREATE TABLE gd_executions
 (
     id           uuid PRIMARY KEY      DEFAULT gen_random_uuid(),
+    user_id      uuid         NOT NULL,
     task_id      uuid         NOT NULL,
     task_version integer      NOT NULL,
     trigger_key  varchar(180) NOT NULL UNIQUE,
@@ -172,6 +174,8 @@ CREATE TABLE gd_executions
     created_at   timestamptz  NOT NULL DEFAULT now()
 );
 CREATE INDEX executions_task_idx ON gd_executions (task_id, created_at DESC);
+CREATE INDEX executions_user_idx ON gd_executions (user_id, created_at DESC);
+CREATE INDEX job_configs_user_idx ON gd_job_configs (user_id, updated_at DESC);
 
 CREATE TABLE gd_node_executions
 (

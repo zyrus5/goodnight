@@ -27,12 +27,25 @@ pub struct CurrentUser {
     pub id: Uuid,
     pub username: String,
     pub display_name: String,
+    pub role: String,
     pub is_admin: bool,
 }
 
 impl CurrentUser {
     pub fn require_admin(&self) -> ApiResult<()> {
         if self.is_admin {
+            Ok(())
+        } else {
+            Err(ApiError::forbidden())
+        }
+    }
+
+    pub fn can_maintain_resources(&self) -> bool {
+        self.is_admin || matches!(self.role.as_str(), "ADMIN" | "OPS" | "DEVELOPER")
+    }
+
+    pub fn require_resource_maintainer(&self) -> ApiResult<()> {
+        if self.can_maintain_resources() {
             Ok(())
         } else {
             Err(ApiError::forbidden())
@@ -51,7 +64,7 @@ impl FromRequestParts<AppState> for CurrentUser {
             .ok_or_else(ApiError::unauthorized)?;
         let hash = token_hash(token.as_bytes());
         sqlx::query_as::<_, CurrentUser>(
-            "SELECT u.id,u.username,u.display_name,u.is_admin FROM gd_sessions s JOIN gd_users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.is_active",
+            "SELECT u.id,u.username,u.display_name,u.role,u.is_admin FROM gd_sessions s JOIN gd_users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.is_active",
         )
         .bind(hash)
         .fetch_optional(&state.db)
@@ -141,7 +154,7 @@ pub async fn bootstrap_admin(db: &PgPool, config: Arc<Config>) -> anyhow::Result
         anyhow::anyhow!("BOOTSTRAP_ADMIN_PASSWORD is required for an empty database")
     })?;
     let hash = hash_password(password).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    sqlx::query("INSERT INTO gd_users(username,display_name,password_hash,is_admin) VALUES($1,$2,$3,true) ON CONFLICT DO NOTHING")
+    sqlx::query("INSERT INTO gd_users(username,display_name,password_hash,role,is_admin) VALUES($1,$2,$3,'ADMIN',true) ON CONFLICT DO NOTHING")
         .bind(username).bind(&config.bootstrap_admin_display_name).bind(hash).execute(db).await?;
     tracing::info!(username, "bootstrap administrator created");
     Ok(())
@@ -156,7 +169,7 @@ pub async fn component_permission(
     if user.is_admin {
         return Ok(());
     }
-    let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM gd_component_members WHERE component_id=$1 AND user_id=$2 AND ($3=false OR role='MAINTAINER'))")
+    let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM gd_components c WHERE c.id=$1 AND (($3=false AND c.is_public) OR EXISTS(SELECT 1 FROM gd_component_members m WHERE m.component_id=c.id AND m.user_id=$2 AND ($3=false OR m.role IN ('OWNER','DEVELOPER')))))")
         .bind(component_id).bind(user.id).bind(maintain).fetch_one(db).await?;
     if allowed {
         Ok(())

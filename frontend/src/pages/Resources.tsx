@@ -14,13 +14,14 @@ const users: ResourceConfig = {
   title: "用户管理",
   description: "维护本地账户、管理员身份和启停状态。",
   endpoint: "/users",
+  adminOnly: true,
   columns: [
     { key: "username", label: "用户名" },
     { key: "display_name", label: "姓名" },
     {
-      key: "is_admin",
+      key: "role",
       label: "角色",
-      render: (v) => (v ? "系统管理员" : "普通用户"),
+      render: (v) => ({ ADMIN: "系统管理员", OPS: "运维", DEVELOPER: "开发", TESTER: "测试" })[String(v)] ?? String(v),
     },
     active,
     date,
@@ -34,7 +35,12 @@ const users: ResourceConfig = {
       type: "password",
       placeholder: "更新时留空表示不修改",
     },
-    { key: "is_admin", label: "系统管理员", type: "checkbox" },
+    { key: "role", label: "系统角色", type: "select", required: true, defaultValue: "TESTER", choices: [
+      { value: "ADMIN", label: "系统管理员" },
+      { value: "OPS", label: "运维" },
+      { value: "DEVELOPER", label: "开发" },
+      { value: "TESTER", label: "测试" },
+    ] },
     { key: "is_active", label: "启用账户", type: "checkbox" },
   ],
 };
@@ -42,6 +48,7 @@ const customers: ResourceConfig = {
   title: "客户管理",
   description: "维护交付客户及其环境入口。",
   endpoint: "/customers",
+  maintainerOnly: true,
   columns: [
     { key: "code", label: "客户代码" },
     { key: "name", label: "客户名称" },
@@ -62,13 +69,20 @@ const customers: ResourceConfig = {
 };
 const components: ResourceConfig = {
   title: "组件管理",
-  description: "管理业务组件、维护人员和测试人员。",
+  description: "管理业务组件负责人、开发人员和测试人员。",
   endpoint: "/components",
+  maintainerOnly: true,
+  memberRoles: [
+    { role: "DEVELOPER", label: "添加开发人员", field: "developer_ids" },
+    { role: "TESTER", label: "添加测试人员", field: "tester_ids" },
+  ],
   columns: [
     { key: "code", label: "组件代码" },
     { key: "name", label: "组件名称" },
-    { key: "maintainer_names", label: "维护人员" },
+    { key: "owner_names", label: "组件负责人" },
+    { key: "developer_names", label: "开发人员" },
     { key: "tester_names", label: "测试人员" },
+    { key: "is_public", label: "公共组件", render: (v) => v ? "是" : "否" },
     { key: "instance_count", label: "实例数" },
     active,
     date,
@@ -77,17 +91,17 @@ const components: ResourceConfig = {
     { key: "code", label: "组件代码", required: true, immutable: true },
     { key: "name", label: "组件名称", required: true },
     {
-      key: "maintainer_ids",
-      label: "维护人员",
-      type: "multiselect",
+      key: "owner_id",
+      label: "组件负责人",
+      type: "select",
       required: true,
       options: { endpoint: "/users", label: (r) => String(r.display_name) },
     },
     {
-      key: "tester_ids",
-      label: "测试人员",
-      type: "multiselect",
-      options: { endpoint: "/users", label: (r) => String(r.display_name) },
+      key: "is_public",
+      label: "是否公共组件",
+      type: "checkbox",
+      defaultValue: false,
     },
     {
       key: "is_active",
@@ -109,6 +123,7 @@ const environments: ResourceConfig = {
   description:
     "配置 Jenkins 连接；创建时自动检测，连接成功则启用，失败则停用。",
   endpoint: "/environments",
+  maintainerOnly: true,
   copyable: true,
   associateComponents: true,
   filters: [
@@ -167,6 +182,8 @@ const instances: ResourceConfig = {
   description: "组件实例统一通过环境管理的“关联组件”功能创建。",
   endpoint: "/component-instances",
   createDisabled: true,
+  editDisabled: true,
+  maintainerOnly: true,
   filters: [
     {
       key: "component_id",
@@ -248,7 +265,6 @@ const instances: ResourceConfig = {
       },
     },
     { key: "folder_full_name", label: "Folder full name", required: true },
-    { key: "folder_path", label: "相对路径", required: true },
     { key: "folder_url", label: "最近发现 URL" },
     { key: "custom_fields", label: "自定义信息 JSON", type: "json" },
     { key: "notes", label: "备注", type: "textarea" },

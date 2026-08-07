@@ -1,7 +1,7 @@
 import { http } from '../lib/http'
 
 export interface Page<T> { items: T[]; page: number; page_size: number; total: number }
-export interface User { id:string; username:string; display_name:string; is_admin:boolean; is_active?:boolean; version?:number }
+export interface User { id:string; username:string; display_name:string; role:string; is_admin:boolean; is_active?:boolean; version?:number }
 export interface Resource { id:string; version?:number; [key:string]:unknown }
 
 export async function getPage<T>(endpoint:string, q='', page=1, params:Record<string,unknown>={}) {

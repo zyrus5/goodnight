@@ -61,14 +61,16 @@ pub async fn list(
             .fetch_one(&s.db)
             .await?
     } else {
-        sqlx::query_scalar("SELECT count(*) FROM gd_tasks WHERE NOT is_deleted AND name ILIKE $1 AND creator_id=$2")
-            .bind(&pat)
-            .bind(u.id)
-            .fetch_one(&s.db)
-            .await?
+        sqlx::query_scalar(
+            "SELECT count(*) FROM gd_tasks WHERE NOT is_deleted AND name ILIKE $1 AND user_id=$2",
+        )
+        .bind(&pat)
+        .bind(u.id)
+        .fetch_one(&s.db)
+        .await?
     };
     let q = format!(
-        "{TASK_SELECT} WHERE NOT t.is_deleted AND t.name ILIKE $1 AND ($2::uuid IS NULL OR t.creator_id=$2) ORDER BY t.updated_at DESC LIMIT $3 OFFSET $4"
+        "{TASK_SELECT} WHERE NOT t.is_deleted AND t.name ILIKE $1 AND ($2::uuid IS NULL OR t.user_id=$2) ORDER BY t.updated_at DESC LIMIT $3 OFFSET $4"
     );
     let items = sqlx::query_as(&q)
         .bind(pat)
@@ -101,7 +103,7 @@ pub async fn create(
     let definition = encrypt_definition(&s, &i.definition).await?;
     let (next, scheduled) = schedule_fields(&i)?;
     let mut tx = s.db.begin().await?;
-    let id:Uuid=sqlx::query_scalar("INSERT INTO gd_tasks(name,description,creator_id,trigger_type,scheduled_at,cron_expression,timezone,is_enabled,next_run_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id").bind(i.name.trim()).bind(i.description).bind(u.id).bind(&i.trigger_type).bind(scheduled).bind(&i.cron_expression).bind(&i.timezone).bind(i.is_enabled).bind(next).fetch_one(&mut *tx).await?;
+    let id:Uuid=sqlx::query_scalar("INSERT INTO gd_tasks(user_id,name,description,creator_id,trigger_type,scheduled_at,cron_expression,timezone,is_enabled,next_run_at) VALUES($1,$2,$3,$1,$4,$5,$6,$7,$8,$9) RETURNING id").bind(u.id).bind(i.name.trim()).bind(i.description).bind(&i.trigger_type).bind(scheduled).bind(&i.cron_expression).bind(&i.timezone).bind(i.is_enabled).bind(next).fetch_one(&mut *tx).await?;
     sqlx::query(
         "INSERT INTO gd_task_versions(task_id,version,definition,created_by) VALUES($1,1,$2,$3)",
     )
@@ -126,7 +128,7 @@ pub async fn create(
                 &s,
                 id,
                 1,
-                format!("manual:{key}"),
+                format!("manual:{}:{key}", u.id),
                 "IMMEDIATE",
                 Some(u.id),
                 None,
@@ -257,7 +259,7 @@ pub async fn run(
         &s,
         id,
         t.current_version,
-        format!("manual:{key}"),
+        format!("manual:{}:{key}", u.id),
         "IMMEDIATE",
         Some(u.id),
         None,
@@ -272,7 +274,7 @@ pub async fn run(
         json!({"execution_id":eid}),
     )
     .await;
-    Ok(Json(execution_by_id(&s, eid).await?))
+    Ok(Json(execution_by_id(&s, &u, eid).await?))
 }
 pub async fn preview(Json(input): Json<Value>) -> ApiResult<Json<Value>> {
     let expr = input
@@ -289,21 +291,23 @@ pub async fn preview(Json(input): Json<Value>) -> ApiResult<Json<Value>> {
 
 pub async fn executions(
     State(s): State<AppState>,
-    _: CurrentUser,
+    u: CurrentUser,
     Query(p): Query<PageQuery>,
 ) -> ApiResult<Json<Page<ExecutionView>>> {
     let pat = p.pattern();
     let total = sqlx::query_scalar(
-        "SELECT count(*) FROM gd_executions e JOIN gd_tasks t ON t.id=e.task_id WHERE t.name ILIKE $1",
+        "SELECT count(*) FROM gd_executions e JOIN gd_tasks t ON t.id=e.task_id WHERE t.name ILIKE $1 AND ($2::uuid IS NULL OR e.user_id=$2)",
     )
     .bind(&pat)
+    .bind(if u.is_admin { None } else { Some(u.id) })
     .fetch_one(&s.db)
     .await?;
     let q = format!(
-        "{EXEC_SELECT} WHERE t.name ILIKE $1 ORDER BY e.created_at DESC LIMIT $2 OFFSET $3"
+        "{EXEC_SELECT} WHERE t.name ILIKE $1 AND ($2::uuid IS NULL OR e.user_id=$2) ORDER BY e.created_at DESC LIMIT $3 OFFSET $4"
     );
     let items = sqlx::query_as(&q)
         .bind(pat)
+        .bind(if u.is_admin { None } else { Some(u.id) })
         .bind(p.limit())
         .bind(p.offset())
         .fetch_all(&s.db)
@@ -317,10 +321,10 @@ pub async fn executions(
 }
 pub async fn execution_detail(
     State(s): State<AppState>,
-    _: CurrentUser,
+    u: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    let execution = execution_by_id(&s, id).await?;
+    let execution = execution_by_id(&s, &u, id).await?;
     let nodes=sqlx::query_as::<_,NodeExecutionView>("SELECT id,execution_id,node_key,node_name,dependencies,status,queue_id,queue_url,build_number,build_url,blocking_reason,error_summary,submitted_at,started_at,finished_at,updated_at FROM gd_node_executions WHERE execution_id=$1 ORDER BY submitted_at NULLS FIRST,node_name").bind(id).fetch_all(&s.db).await?;
     Ok(Json(json!({"execution":execution,"nodes":nodes})))
 }
@@ -329,15 +333,18 @@ pub async fn stop_execution(
     u: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    let definition: Value = sqlx::query_scalar("SELECT snapshot FROM gd_executions WHERE id=$1")
-        .bind(id)
-        .fetch_optional(&s.db)
-        .await?
-        .ok_or_else(|| ApiError::not_found("执行记录不存在"))?;
+    let definition: Value = sqlx::query_scalar(
+        "SELECT snapshot FROM gd_executions WHERE id=$1 AND ($2::uuid IS NULL OR user_id=$2)",
+    )
+    .bind(id)
+    .bind(if u.is_admin { None } else { Some(u.id) })
+    .fetch_optional(&s.db)
+    .await?
+    .ok_or_else(|| ApiError::not_found("执行记录不存在"))?;
     validate_definition_permissions(&s, &u, &definition).await?;
     execution::request_cancel(&s, id).await?;
     audit::record(&s.db, Some(u.id), "STOP", "EXECUTION", Some(id), json!({})).await;
-    Ok(Json(json!({"ok":true,"status":"CANCELING"})))
+    Ok(Json(json!({"ok":true,"status":"CANCELED"})))
 }
 
 pub async fn copy_execution(
@@ -346,15 +353,16 @@ pub async fn copy_execution(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
     let (name, mut definition): (String, Value) = sqlx::query_as(
-        "SELECT t.name,e.snapshot FROM gd_executions e JOIN gd_tasks t ON t.id=e.task_id WHERE e.id=$1 AND e.status IN('SUCCESS','FAILED','CANCELED')",
+        "SELECT t.name,e.snapshot FROM gd_executions e JOIN gd_tasks t ON t.id=e.task_id WHERE e.id=$1 AND e.status IN('SUCCESS','FAILED','CANCELED') AND ($2::uuid IS NULL OR e.user_id=$2)",
     )
     .bind(id)
+    .bind(if u.is_admin { None } else { Some(u.id) })
     .fetch_optional(&s.db)
     .await?
     .ok_or_else(|| ApiError::conflict("只有已结束执行才能复制"))?;
     validate_definition_permissions(&s, &u, &definition).await?;
     clear_encrypted(&mut definition);
-    let task_id: Uuid = sqlx::query_scalar("INSERT INTO gd_tasks(name,description,creator_id,trigger_type,timezone,is_enabled) VALUES($1,'从历史执行复制；敏感参数需要重新填写',$2,'IMMEDIATE','Asia/Shanghai',false) RETURNING id")
+    let task_id: Uuid = sqlx::query_scalar("INSERT INTO gd_tasks(user_id,name,description,creator_id,trigger_type,timezone,is_enabled) VALUES($2,$1,'从历史执行复制；敏感参数需要重新填写',$2,'IMMEDIATE','Asia/Shanghai',false) RETURNING id")
         .bind(format!("{name} - 复制"))
         .bind(u.id)
         .fetch_one(&s.db)
@@ -380,10 +388,10 @@ pub async fn copy_execution(
 }
 pub async fn node_log(
     State(s): State<AppState>,
-    _: CurrentUser,
-    Path((_eid, nid)): Path<(Uuid, Uuid)>,
+    u: CurrentUser,
+    Path((eid, nid)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<Json<Value>> {
-    let row=sqlx::query_as::<_,(String,String,i32,bool,String,Option<i64>,i64)>("SELECT e.jenkins_url,j.job_full_name,e.request_timeout_seconds,e.allow_invalid_certs,n.status,n.build_number,n.log_offset FROM gd_node_executions n JOIN gd_environments e ON e.id=n.environment_id JOIN gd_job_configs j ON j.id=n.job_config_id WHERE n.id=$1").bind(nid).fetch_optional(&s.db).await?.ok_or_else(||ApiError::not_found("节点不存在"))?;
+    let row=sqlx::query_as::<_,(String,String,i32,bool,String,Option<i64>,i64)>("SELECT e.jenkins_url,j.job_full_name,e.request_timeout_seconds,false,n.status,n.build_number,n.log_offset FROM gd_node_executions n JOIN gd_executions x ON x.id=n.execution_id JOIN gd_environments e ON e.id=n.environment_id JOIN gd_job_configs j ON j.id=n.job_config_id WHERE n.id=$1 AND n.execution_id=$2 AND ($3::uuid IS NULL OR x.user_id=$3)").bind(nid).bind(eid).bind(if u.is_admin { None } else { Some(u.id) }).fetch_optional(&s.db).await?.ok_or_else(||ApiError::not_found("节点不存在"))?;
     let Some(number) = row.5 else {
         return Ok(Json(
             json!({"text":"","next_offset":row.6,"more":true,"reason":"构建尚未开始"}),
@@ -406,7 +414,7 @@ pub async fn node_log(
 
 async fn task_by_id(s: &AppState, u: &CurrentUser, id: Uuid) -> ApiResult<TaskView> {
     let q = format!(
-        "{TASK_SELECT} WHERE t.id=$1 AND NOT t.is_deleted AND ($2::uuid IS NULL OR t.creator_id=$2)"
+        "{TASK_SELECT} WHERE t.id=$1 AND NOT t.is_deleted AND ($2::uuid IS NULL OR t.user_id=$2)"
     );
     sqlx::query_as(&q)
         .bind(id)
@@ -415,10 +423,11 @@ async fn task_by_id(s: &AppState, u: &CurrentUser, id: Uuid) -> ApiResult<TaskVi
         .await?
         .ok_or_else(|| ApiError::not_found("任务不存在"))
 }
-async fn execution_by_id(s: &AppState, id: Uuid) -> ApiResult<ExecutionView> {
-    let q = format!("{EXEC_SELECT} WHERE e.id=$1");
+async fn execution_by_id(s: &AppState, u: &CurrentUser, id: Uuid) -> ApiResult<ExecutionView> {
+    let q = format!("{EXEC_SELECT} WHERE e.id=$1 AND ($2::uuid IS NULL OR e.user_id=$2)");
     sqlx::query_as(&q)
         .bind(id)
+        .bind(if u.is_admin { None } else { Some(u.id) })
         .fetch_optional(&s.db)
         .await?
         .ok_or_else(|| ApiError::not_found("执行记录不存在"))
@@ -503,7 +512,7 @@ async fn validate_definition_permissions(
 ) -> ApiResult<()> {
     for node in d.get("nodes").and_then(Value::as_array).unwrap_or(&vec![]) {
         let jid = parse_uuid(node.get("job_config_id"))?;
-        let cid:Option<Uuid>=sqlx::query_scalar("SELECT i.component_id FROM gd_job_configs j JOIN gd_component_instances i ON i.id=j.component_instance_id JOIN gd_environments e ON e.id=i.environment_id WHERE j.id=$1 AND j.status='ACTIVE' AND i.status='ACTIVE' AND e.is_active AND e.connection_status='CONNECTED'").bind(jid).fetch_optional(&s.db).await?;
+        let cid:Option<Uuid>=sqlx::query_scalar("SELECT i.component_id FROM gd_job_configs j JOIN gd_component_instances i ON i.id=j.component_instance_id JOIN gd_environments e ON e.id=i.environment_id WHERE j.id=$1 AND j.status='ACTIVE' AND i.status='ACTIVE' AND e.is_active AND ($2::uuid IS NULL OR j.user_id=$2)").bind(jid).bind(if u.is_admin { None } else { Some(u.id) }).fetch_optional(&s.db).await?;
         let cid = cid
             .ok_or_else(|| ApiError::bad_request("JOB_UNAVAILABLE", "任务包含不可用的 Job 配置"))?;
         crate::auth::component_permission(&s.db, u, cid, false).await?;

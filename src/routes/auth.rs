@@ -25,6 +25,7 @@ struct LoginRow {
     id: Uuid,
     username: String,
     display_name: String,
+    role: String,
     password_hash: String,
     is_admin: bool,
 }
@@ -33,7 +34,7 @@ pub async fn login(
     State(state): State<AppState>,
     Json(input): Json<LoginRequest>,
 ) -> ApiResult<(HeaderMap, Json<serde_json::Value>)> {
-    let row = sqlx::query_as::<_, LoginRow>("SELECT id,username,display_name,password_hash,is_admin FROM gd_users WHERE username=$1 AND is_active")
+    let row = sqlx::query_as::<_, LoginRow>("SELECT id,username,display_name,password_hash,role,is_admin FROM gd_users WHERE username=$1 AND is_active")
         .bind(input.username.trim()).fetch_optional(&state.db).await?;
     let Some(row) = row else {
         return Err(ApiError::Client(
@@ -75,7 +76,7 @@ pub async fn login(
     Ok((
         headers,
         Json(
-            json!({"id":row.id,"username":row.username,"display_name":row.display_name,"is_admin":row.is_admin}),
+            json!({"id":row.id,"username":row.username,"display_name":row.display_name,"role":row.role,"is_admin":row.is_admin}),
         ),
     ))
 }

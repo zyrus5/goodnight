@@ -18,16 +18,21 @@ use crate::{
     models::{Page, PageQuery},
 };
 
-pub async fn dashboard(State(s): State<AppState>, _: CurrentUser) -> ApiResult<Json<Value>> {
-    let tasks: i64 = sqlx::query_scalar("SELECT count(*) FROM gd_tasks WHERE NOT is_deleted")
-        .fetch_one(&s.db)
-        .await?;
-    let running: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM gd_executions WHERE status IN('RUNNING','CANCELING')",
+pub async fn dashboard(State(s): State<AppState>, u: CurrentUser) -> ApiResult<Json<Value>> {
+    let owner = (!u.is_admin).then_some(u.id);
+    let tasks: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM gd_tasks WHERE NOT is_deleted AND ($1::uuid IS NULL OR user_id=$1)",
     )
+    .bind(owner)
     .fetch_one(&s.db)
     .await?;
-    let failed:i64=sqlx::query_scalar("SELECT count(*) FROM gd_executions WHERE status='FAILED' AND created_at>now()-interval '24 hours'").fetch_one(&s.db).await?;
+    let running: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM gd_executions WHERE status IN('RUNNING','CANCELING') AND ($1::uuid IS NULL OR user_id=$1)",
+    )
+    .bind(owner)
+    .fetch_one(&s.db)
+    .await?;
+    let failed:i64=sqlx::query_scalar("SELECT count(*) FROM gd_executions WHERE status='FAILED' AND created_at>now()-interval '24 hours' AND ($1::uuid IS NULL OR user_id=$1)").bind(owner).fetch_one(&s.db).await?;
     Ok(Json(
         json!({"tasks":tasks,"running":running,"failed_24h":failed}),
     ))
