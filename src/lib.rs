@@ -36,6 +36,7 @@ pub async fn run() -> anyhow::Result<()> {
         crypto,
         jenkins,
         instance_id: Uuid::new_v4(),
+        worker_user_id: Arc::new(tokio::sync::RwLock::new(None)),
     };
     execution::spawn_background(state.clone());
     let application = app::router(state);

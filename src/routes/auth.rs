@@ -54,6 +54,7 @@ pub async fn login(
     }
     let (token, expires) =
         auth::create_session(&state.db, row.id, state.config.session_hours).await?;
+    *state.worker_user_id.write().await = Some(row.id);
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
@@ -81,7 +82,8 @@ pub async fn login(
     ))
 }
 
-pub async fn me(user: CurrentUser) -> Json<CurrentUser> {
+pub async fn me(State(state): State<AppState>, user: CurrentUser) -> Json<CurrentUser> {
+    *state.worker_user_id.write().await = Some(user.id);
     Json(user)
 }
 
@@ -105,6 +107,11 @@ pub async fn logout(
         json!({}),
     )
     .await;
+    let mut worker_user_id = state.worker_user_id.write().await;
+    if *worker_user_id == Some(user.id) {
+        *worker_user_id = None;
+    }
+    drop(worker_user_id);
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         header::SET_COOKIE,

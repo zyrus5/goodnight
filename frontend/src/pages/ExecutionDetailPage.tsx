@@ -11,6 +11,9 @@ interface Node {
   deployment_domain: string;
   environment_name: string;
   argo_url?: string;
+  wiki_url?: string;
+  apollo_url?: string;
+  log_url?: string;
   dependencies: string[];
   status: string;
   queue_url?: string;
@@ -28,6 +31,7 @@ export function ExecutionDetailPage() {
   const navigate = useNavigate();
   const [data, setData] = useState<ExecutionData>();
   const [log, setLog] = useState<Record<string, string>>({});
+  const [instanceInfo, setInstanceInfo] = useState<Record<string, boolean>>({});
   const [error, setError] = useState("");
   const load = () =>
     void http
@@ -182,13 +186,44 @@ export function ExecutionDetailPage() {
                         Jenkins 构建 ↗
                       </a>
                     )}
-                    {node.argo_url && (
-                      <a target="_blank" rel="noreferrer" href={node.argo_url}>
-                        打开 Argo ↗
-                      </a>
-                    )}
+                    <button
+                      onClick={() =>
+                        setInstanceInfo((current) => ({
+                          ...current,
+                          [node.id]: !current[node.id],
+                        }))
+                      }
+                    >
+                      查看组件实例信息
+                    </button>
                     <button onClick={() => void logs(node)}>读取增量日志</button>
                   </div>
+                  {instanceInfo[node.id] && (
+                    <div className="instance-links">
+                      {[
+                        ["Wiki 地址", "打开 Wiki", node.wiki_url],
+                        ["Argo 地址", "打开 Argo", node.argo_url],
+                        ["Apollo 地址", "打开 Apollo", node.apollo_url],
+                        ["日志地址", "打开日志", node.log_url],
+                      ].map(([label, action, url]) => (
+                        <div key={label}>
+                          <span>{label}</span>
+                          {url ? (
+                            <a
+                              href={url}
+                              target="_blank"
+                              rel="noreferrer"
+                              title={url}
+                            >
+                              {action} ↗
+                            </a>
+                          ) : (
+                            <small>未配置</small>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {log[node.id] !== undefined && (
                     <pre className="console">{log[node.id] || "暂无新日志"}</pre>
                   )}

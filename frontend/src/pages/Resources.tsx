@@ -222,6 +222,7 @@ const instances: ResourceConfig = {
     { key: "wiki_url", label: "Wiki", render: externalLink("打开 Wiki") },
     { key: "argo_url", label: "Argo", render: externalLink("打开 Argo") },
     { key: "apollo_url", label: "Apollo", render: externalLink("打开 Apollo") },
+    { key: "log_url", label: "日志地址", render: externalLink("打开日志") },
     {
       key: "folder_full_name",
       label: "Folder 完整路径",
@@ -249,6 +250,7 @@ const instances: ResourceConfig = {
     { key: "wiki_url", label: "Wiki 地址", full: true },
     { key: "argo_url", label: "Argo 地址", full: true },
     { key: "apollo_url", label: "Apollo 地址", full: true },
+    { key: "log_url", label: "日志地址", full: true },
   ],
 };
 instances.deletable = true;

@@ -6,6 +6,7 @@ use axum::{
     routing::{get, post, put},
 };
 use sqlx::PgPool;
+use tokio::sync::RwLock;
 use tower_http::{
     cors::CorsLayer,
     trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
@@ -22,6 +23,7 @@ pub struct AppState {
     pub crypto: Arc<Keyring>,
     pub jenkins: JenkinsClient,
     pub instance_id: Uuid,
+    pub worker_user_id: Arc<RwLock<Option<Uuid>>>,
 }
 
 pub fn router(state: AppState) -> Router {

@@ -193,8 +193,11 @@ async fn scheduler_tick(state: &AppState) -> anyhow::Result<()> {
 }
 
 async fn worker_tick(state: &AppState) -> anyhow::Result<()> {
-    sqlx::query("UPDATE gd_executions SET status='RUNNING',started_at=COALESCE(started_at,now()) WHERE status='SCHEDULED' AND scheduled_at<=now()").execute(&state.db).await?;
-    release_dependencies(&state.db).await?;
+    let Some(worker_user_id) = *state.worker_user_id.read().await else {
+        return Ok(());
+    };
+    sqlx::query("UPDATE gd_executions SET status='RUNNING',started_at=COALESCE(started_at,now()) WHERE status='SCHEDULED' AND scheduled_at<=now() AND user_id=$1").bind(worker_user_id).execute(&state.db).await?;
+    release_dependencies(&state.db, worker_user_id).await?;
     let running: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM gd_node_executions WHERE status IN('QUEUED','RUNNING','UNKNOWN')",
     )
@@ -204,7 +207,7 @@ async fn worker_tick(state: &AppState) -> anyhow::Result<()> {
         .config
         .global_concurrency
         .saturating_sub(running as usize);
-    let mut nodes=sqlx::query_as::<_,WorkNode>("SELECT n.id,n.status,n.parameters,n.timeout_seconds,n.queue_id,n.build_number,n.submitted_at,e.jenkins_url,e.request_timeout_seconds,j.job_full_name,n.environment_id FROM gd_node_executions n JOIN gd_executions x ON x.id=n.execution_id JOIN gd_environments e ON e.id=n.environment_id JOIN gd_job_configs j ON j.id=n.job_config_id WHERE x.status='RUNNING' AND n.status IN('PENDING','QUEUED','RUNNING','UNKNOWN') AND (n.claim_expires_at IS NULL OR n.claim_expires_at<now()) ORDER BY CASE n.status WHEN 'RUNNING' THEN 0 WHEN 'UNKNOWN' THEN 1 WHEN 'QUEUED' THEN 2 ELSE 3 END,n.updated_at LIMIT 100").fetch_all(&state.db).await?;
+    let mut nodes=sqlx::query_as::<_,WorkNode>("SELECT n.id,n.status,n.parameters,n.timeout_seconds,n.queue_id,n.build_number,n.submitted_at,e.jenkins_url,e.request_timeout_seconds,j.job_full_name,n.environment_id FROM gd_node_executions n JOIN gd_executions x ON x.id=n.execution_id JOIN gd_environments e ON e.id=n.environment_id JOIN gd_job_configs j ON j.id=n.job_config_id WHERE x.status='RUNNING' AND x.user_id=$1 AND n.status IN('PENDING','QUEUED','RUNNING','UNKNOWN') AND (n.claim_expires_at IS NULL OR n.claim_expires_at<now()) ORDER BY CASE n.status WHEN 'RUNNING' THEN 0 WHEN 'UNKNOWN' THEN 1 WHEN 'QUEUED' THEN 2 ELSE 3 END,n.updated_at LIMIT 100").bind(worker_user_id).fetch_all(&state.db).await?;
     let mut submitted = 0;
     for node in nodes.drain(..) {
         if node.status == "PENDING" && submitted >= capacity {
@@ -225,7 +228,7 @@ async fn worker_tick(state: &AppState) -> anyhow::Result<()> {
             unclaim(&state.db, node.id).await?;
         }
     }
-    finalize_executions(&state.db).await?;
+    finalize_executions(&state.db, worker_user_id).await?;
     Ok(())
 }
 
@@ -409,8 +412,8 @@ fn dependency_decision(keys: &[String], statuses: &HashMap<String, String>) -> D
     }
 }
 
-async fn release_dependencies(db: &PgPool) -> anyhow::Result<()> {
-    let rows=sqlx::query_as::<_,(Uuid,Uuid,String,Value)>("SELECT id,execution_id,node_key,dependencies FROM gd_node_executions WHERE status='WAITING_DEPENDENCY' AND execution_id IN(SELECT id FROM gd_executions WHERE status='RUNNING')").fetch_all(db).await?;
+async fn release_dependencies(db: &PgPool, user_id: Uuid) -> anyhow::Result<()> {
+    let rows=sqlx::query_as::<_,(Uuid,Uuid,String,Value)>("SELECT id,execution_id,node_key,dependencies FROM gd_node_executions WHERE status='WAITING_DEPENDENCY' AND execution_id IN(SELECT id FROM gd_executions WHERE status='RUNNING' AND user_id=$1)").bind(user_id).fetch_all(db).await?;
     for (id, eid, _key, deps) in rows {
         let keys = deps
             .as_array()
@@ -454,11 +457,13 @@ async fn release_dependencies(db: &PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn finalize_executions(db: &PgPool) -> anyhow::Result<()> {
-    let ids: Vec<Uuid> =
-        sqlx::query_scalar("SELECT id FROM gd_executions WHERE status IN('RUNNING','CANCELING')")
-            .fetch_all(db)
-            .await?;
+async fn finalize_executions(db: &PgPool, user_id: Uuid) -> anyhow::Result<()> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM gd_executions WHERE status IN('RUNNING','CANCELING') AND user_id=$1",
+    )
+    .bind(user_id)
+    .fetch_all(db)
+    .await?;
     for id in ids {
         let states: Vec<String> =
             sqlx::query_scalar("SELECT status FROM gd_node_executions WHERE execution_id=$1")

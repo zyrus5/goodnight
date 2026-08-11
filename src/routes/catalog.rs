@@ -20,7 +20,7 @@ use crate::{
 
 const COMPONENT_SELECT: &str = "SELECT c.id,c.code,c.name,c.is_public,c.is_active,c.version,COALESCE(string_agg(DISTINCT u.display_name,', ') FILTER(WHERE m.role='OWNER'),'') owner_names,COALESCE(string_agg(DISTINCT u.display_name,', ') FILTER(WHERE m.role='DEVELOPER'),'') developer_names,COALESCE(string_agg(DISTINCT u.display_name,', ') FILTER(WHERE m.role='TESTER'),'') tester_names,(array_agg(DISTINCT m.user_id) FILTER(WHERE m.role='OWNER'))[1] owner_id,COALESCE(array_agg(DISTINCT m.user_id) FILTER(WHERE m.role='DEVELOPER'),'{}') developer_ids,COALESCE(array_agg(DISTINCT m.user_id) FILTER(WHERE m.role='TESTER'),'{}') tester_ids,count(DISTINCT i.id) instance_count,c.created_at,c.updated_at FROM gd_components c LEFT JOIN gd_component_members m ON m.component_id=c.id LEFT JOIN gd_users u ON u.id=m.user_id LEFT JOIN gd_component_instances i ON i.component_id=c.id";
 const ENV_SELECT: &str = "SELECT e.id,e.customer_id,c.code customer_code,c.name customer_name,e.deployment_domain,e.code,e.name,e.jenkins_url,e.request_timeout_seconds,e.notes,e.is_active,e.version,e.created_at,e.updated_at FROM gd_environments e JOIN gd_customers c ON c.id=e.customer_id";
-const INSTANCE_SELECT: &str = "SELECT i.id,i.name,i.component_id,comp.name component_name,i.environment_id,e.name environment_name,e.customer_id,cu.name customer_name,e.deployment_domain,i.folder_full_name,i.folder_url,i.wiki_url,i.argo_url,i.apollo_url,i.status,i.notes,i.custom_fields,i.version,i.created_at,i.updated_at FROM gd_component_instances i JOIN gd_components comp ON comp.id=i.component_id JOIN gd_environments e ON e.id=i.environment_id JOIN gd_customers cu ON cu.id=e.customer_id";
+const INSTANCE_SELECT: &str = "SELECT i.id,i.name,i.component_id,comp.name component_name,i.environment_id,e.name environment_name,e.customer_id,cu.name customer_name,e.deployment_domain,i.folder_full_name,i.folder_url,i.wiki_url,i.argo_url,i.apollo_url,i.log_url,i.status,i.notes,i.custom_fields,i.version,i.created_at,i.updated_at FROM gd_component_instances i JOIN gd_components comp ON comp.id=i.component_id JOIN gd_environments e ON e.id=i.environment_id JOIN gd_customers cu ON cu.id=e.customer_id";
 const JOB_SELECT: &str = "SELECT j.id,j.component_instance_id,i.name instance_name,i.component_id,c.name component_name,i.environment_id,e.name environment_name,e.customer_id,cu.name customer_name,e.deployment_domain,j.display_name,j.description,j.job_full_name,j.job_url,j.status,j.current_version,j.version,v.parameter_definitions,v.parameter_presets,j.created_at,j.updated_at FROM gd_job_configs j JOIN gd_component_instances i ON i.id=j.component_instance_id JOIN gd_components c ON c.id=i.component_id JOIN gd_environments e ON e.id=i.environment_id JOIN gd_customers cu ON cu.id=e.customer_id JOIN gd_job_config_versions v ON v.job_config_id=j.id AND v.version=j.current_version";
 
 #[derive(Deserialize)]
@@ -73,6 +73,7 @@ pub struct InstanceUpdateInput {
     wiki_url: Option<String>,
     argo_url: Option<String>,
     apollo_url: Option<String>,
+    log_url: Option<String>,
     version: i32,
 }
 #[derive(Deserialize)]
@@ -584,12 +585,13 @@ pub async fn update_instance(
             "实例名称不能为空且最多 160 字符",
         ));
     }
-    let affected = sqlx::query("UPDATE gd_component_instances SET name=$2,wiki_url=$3,argo_url=$4,apollo_url=$5,version=version+1,updated_at=now() WHERE id=$1 AND version=$6")
+    let affected = sqlx::query("UPDATE gd_component_instances SET name=$2,wiki_url=$3,argo_url=$4,apollo_url=$5,log_url=$6,version=version+1,updated_at=now() WHERE id=$1 AND version=$7")
         .bind(id)
         .bind(i.name.trim())
         .bind(optional_text(i.wiki_url))
         .bind(optional_text(i.argo_url))
         .bind(optional_text(i.apollo_url))
+        .bind(optional_text(i.log_url))
         .bind(i.version)
         .execute(&s.db)
         .await?;
