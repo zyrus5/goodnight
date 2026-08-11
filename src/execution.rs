@@ -355,17 +355,19 @@ async fn process_node(state: &AppState, n: &WorkNode) -> anyhow::Result<()> {
             };
             if b.building {
                 sqlx::query(
-                    "UPDATE gd_node_executions SET status='RUNNING',error_summary=NULL,updated_at=now() WHERE id=$1",
+                    "UPDATE gd_node_executions SET status='RUNNING',build_url=$2,error_summary=NULL,updated_at=now() WHERE id=$1",
                 )
                 .bind(n.id)
+                .bind(&b.url)
                 .execute(&state.db)
                 .await?;
             } else if let Some(result) = b.result {
                 let success = result == "SUCCESS";
-                sqlx::query("UPDATE gd_node_executions SET status=$2,finished_at=now(),error_summary=CASE WHEN $2='FAILED' THEN $3 ELSE NULL END,updated_at=now() WHERE id=$1").bind(n.id).bind(if success{"SUCCESS"}else{"FAILED"}).bind(format!("Jenkins 结果：{result}")).execute(&state.db).await?;
+                sqlx::query("UPDATE gd_node_executions SET status=$2,build_url=$3,finished_at=now(),error_summary=CASE WHEN $2='FAILED' THEN $4 ELSE NULL END,updated_at=now() WHERE id=$1").bind(n.id).bind(if success{"SUCCESS"}else{"FAILED"}).bind(&b.url).bind(format!("Jenkins 结果：{result}")).execute(&state.db).await?;
             } else {
-                sqlx::query("UPDATE gd_node_executions SET status='RUNNING',error_summary='Jenkins 尚未返回明确执行结果',updated_at=now() WHERE id=$1")
+                sqlx::query("UPDATE gd_node_executions SET status='RUNNING',build_url=$2,error_summary='Jenkins 尚未返回明确执行结果',updated_at=now() WHERE id=$1")
                     .bind(n.id)
+                    .bind(&b.url)
                     .execute(&state.db)
                     .await?;
             }

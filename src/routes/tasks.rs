@@ -326,7 +326,11 @@ pub async fn execution_detail(
 ) -> ApiResult<Json<Value>> {
     let execution = execution_by_id(&s, &u, id).await?;
     let nodes=sqlx::query_as::<_,NodeExecutionView>("SELECT n.id,n.execution_id,n.node_key,n.node_name,c.name component_name,cu.name customer_name,e.deployment_domain,e.name environment_name,i.argo_url,i.wiki_url,i.apollo_url,i.log_url,n.dependencies,n.status,n.queue_id,n.queue_url,n.build_number,n.build_url,n.blocking_reason,n.error_summary,n.submitted_at,n.started_at,n.finished_at,n.updated_at FROM gd_node_executions n JOIN gd_job_configs j ON j.id=n.job_config_id JOIN gd_component_instances i ON i.id=j.component_instance_id JOIN gd_components c ON c.id=i.component_id JOIN gd_environments e ON e.id=n.environment_id JOIN gd_customers cu ON cu.id=e.customer_id WHERE n.execution_id=$1 ORDER BY n.submitted_at NULLS FIRST,n.node_name").bind(id).fetch_all(&s.db).await?;
-    Ok(Json(json!({"execution":execution,"nodes":nodes})))
+    Ok(Json(json!({
+        "execution": execution,
+        "nodes": nodes,
+        "worker_interval_seconds": s.config.worker_interval.as_secs(),
+    })))
 }
 pub async fn delete_execution(
     State(s): State<AppState>,

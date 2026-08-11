@@ -24,6 +24,7 @@ interface Node {
 interface ExecutionData {
   execution: Record<string, unknown>;
   nodes: Node[];
+  worker_interval_seconds: number;
 }
 
 export function ExecutionDetailPage() {
@@ -43,9 +44,15 @@ export function ExecutionDetailPage() {
       .catch((requestError) => setError(errorMessage(requestError)));
   useEffect(() => {
     load();
-    const timer = window.setInterval(() => load(), 2000);
-    return () => window.clearInterval(timer);
   }, [id]);
+  useEffect(() => {
+    if (!data?.worker_interval_seconds) return;
+    const timer = window.setInterval(
+      () => load(),
+      data.worker_interval_seconds * 1000,
+    );
+    return () => window.clearInterval(timer);
+  }, [id, data?.worker_interval_seconds]);
   const levels = useMemo(() => executionLevels(data?.nodes ?? []), [data?.nodes]);
 
   async function logs(node: Node) {
@@ -126,7 +133,7 @@ export function ExecutionDetailPage() {
         </div>
         <div>
           <small>刷新频率</small>
-          <strong>每 2 秒</strong>
+          <strong>每 {data.worker_interval_seconds} 秒</strong>
         </div>
       </div>
       <section className="execution-flow panel">
