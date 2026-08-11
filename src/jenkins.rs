@@ -1,9 +1,14 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use reqwest::{Client, Method, Response, header::HeaderMap, redirect::Policy};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use tokio::sync::RwLock;
 use url::Url;
 
 use crate::config::Config;
@@ -11,6 +16,7 @@ use crate::config::Config;
 #[derive(Clone)]
 pub struct JenkinsClient {
     config: Arc<Config>,
+    crumb_cache: Arc<RwLock<HashMap<String, CachedCrumb>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,17 +39,26 @@ pub struct JenkinsRoot {
     pub jobs: Vec<JenkinsItem>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Crumb {
     #[serde(rename = "crumbRequestField")]
     pub field: String,
     pub crumb: String,
 }
 
+#[derive(Clone)]
 struct CrumbContext {
     value: Crumb,
     cookie: Option<String>,
 }
+
+struct CachedCrumb {
+    base: String,
+    context: CrumbContext,
+    expires_at: Instant,
+}
+
+const CRUMB_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QueueItem {
@@ -69,7 +84,10 @@ pub struct BuildInfo {
 
 impl JenkinsClient {
     pub fn new(config: Arc<Config>) -> Self {
-        Self { config }
+        Self {
+            config,
+            crumb_cache: Arc::new(RwLock::new(HashMap::new())),
+        }
     }
 
     pub async fn validate_url(&self, raw: &str) -> Result<Url> {
@@ -210,6 +228,18 @@ impl JenkinsClient {
     }
 
     async fn crumb(&self, base: &str, timeout: u64, invalid_certs: bool) -> Result<CrumbContext> {
+        let username = self.config.jenkins_username.clone();
+        let normalized_base = base.trim_end_matches('/').to_owned();
+        if let Some(context) = self
+            .crumb_cache
+            .read()
+            .await
+            .get(&username)
+            .filter(|cached| cached.base == normalized_base && cached.expires_at > Instant::now())
+            .map(|cached| cached.context.clone())
+        {
+            return Ok(context);
+        }
         let request = self
             .request(
                 Method::GET,
@@ -246,10 +276,19 @@ impl JenkinsClient {
                 String::from_utf8_lossy(&body)
             );
         }
-        Ok(CrumbContext {
+        let context = CrumbContext {
             value: serde_json::from_slice(&body).context("Jenkins crumb 响应格式无效")?,
             cookie: (!cookie.is_empty()).then_some(cookie),
-        })
+        };
+        self.crumb_cache.write().await.insert(
+            username,
+            CachedCrumb {
+                base: normalized_base,
+                context: context.clone(),
+                expires_at: Instant::now() + CRUMB_CACHE_TTL,
+            },
+        );
+        Ok(context)
     }
 
     pub async fn trigger(

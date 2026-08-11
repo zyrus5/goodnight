@@ -35,7 +35,7 @@ export function ExecutionsPage() {
       <tbody>{items.map((execution) => {
         const ended = ["SUCCESS", "FAILED", "CANCELED"].includes(String(execution.status));
         return <tr key={execution.id}>
-          <td><strong>{String(execution.task_name)}</strong></td><td>{String(execution.trigger_type)}</td>
+          <td><strong>{String(execution.task_name)}</strong></td><td>{trigger(String(execution.trigger_type))}</td>
           <td><span className={`status ${String(execution.status).toLowerCase()}`}>{String(execution.status)}</span></td>
           <td>{date(execution.scheduled_at)}</td><td>{date(execution.started_at)}</td><td>{date(execution.finished_at)}</td>
           <td><div className="row-actions"><Link to={`/executions/${execution.id}`}>查看节点</Link>{ended && <button className="link-button danger-text" onClick={() => void remove(execution)}>删除</button>}</div></td>
@@ -46,3 +46,8 @@ export function ExecutionsPage() {
 }
 
 const date = (value: unknown) => value ? new Date(String(value)).toLocaleString() : "—";
+const trigger = (value: string) => ({
+  IMMEDIATE: "立即执行",
+  ONCE: "指定时间",
+  CRON: "周期执行",
+})[value] ?? value;

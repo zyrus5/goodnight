@@ -182,7 +182,6 @@ const instances: ResourceConfig = {
   description: "组件实例统一通过环境管理的“关联组件”功能创建。",
   endpoint: "/component-instances",
   createDisabled: true,
-  editDisabled: true,
   maintainerOnly: true,
   filters: [
     {
@@ -220,6 +219,9 @@ const instances: ResourceConfig = {
     { key: "customer_name", label: "客户" },
     { key: "environment_name", label: "环境" },
     { key: "deployment_domain", label: "部署域" },
+    { key: "wiki_url", label: "Wiki", render: externalLink("打开 Wiki") },
+    { key: "argo_url", label: "Argo", render: externalLink("打开 Argo") },
+    { key: "apollo_url", label: "Apollo", render: externalLink("打开 Apollo") },
     {
       key: "folder_full_name",
       label: "Folder 完整路径",
@@ -244,34 +246,19 @@ const instances: ResourceConfig = {
   ],
   fields: [
     { key: "name", label: "实例名称", required: true },
-    {
-      key: "component_id",
-      label: "组件",
-      type: "select",
-      required: true,
-      options: {
-        endpoint: "/components",
-        label: (r) => `${r.code} · ${r.name}`,
-      },
-    },
-    {
-      key: "environment_id",
-      label: "环境",
-      type: "select",
-      required: true,
-      options: {
-        endpoint: "/environments",
-        label: (r) => `${r.customer_name} / ${r.name}`,
-      },
-    },
-    { key: "folder_full_name", label: "Folder full name", required: true },
-    { key: "folder_url", label: "最近发现 URL" },
-    { key: "custom_fields", label: "自定义信息 JSON", type: "json" },
-    { key: "notes", label: "备注", type: "textarea" },
+    { key: "wiki_url", label: "Wiki 地址", full: true },
+    { key: "argo_url", label: "Argo 地址", full: true },
+    { key: "apollo_url", label: "Apollo 地址", full: true },
   ],
 };
 instances.deletable = true;
 instances.manageJobs = true;
+
+function externalLink(label: string) {
+  return (value: unknown) => value ? (
+    <a href={String(value)} target="_blank" rel="noreferrer">{label}</a>
+  ) : "—";
+}
 export const UsersPage = () => <ResourcePage config={users} />;
 export const CustomersPage = () => <ResourcePage config={customers} />;
 export const ComponentsPage = () => <ResourcePage config={components} />;

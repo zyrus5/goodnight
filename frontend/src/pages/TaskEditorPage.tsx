@@ -135,6 +135,18 @@ export function TaskEditorPage() {
       current.map((node) => (node.key === key ? { ...node, ...patch } : node)),
     );
   }
+  function remove(key: string) {
+    setNodes((current) =>
+      current
+        .filter((node) => node.key !== key)
+        .map((node) => ({
+          ...node,
+          dependencies: node.dependencies.filter(
+            (dependency) => dependency !== key,
+          ),
+        })),
+    );
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -409,11 +421,7 @@ export function TaskEditorPage() {
                         />
                         <button
                           type="button"
-                          onClick={() =>
-                            setNodes((current) =>
-                              current.filter((item) => item.key !== node.key),
-                            )
-                          }
+                          onClick={() => remove(node.key)}
                         >
                           ×
                         </button>

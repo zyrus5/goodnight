@@ -95,7 +95,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/component-instances/{id}",
-            axum::routing::delete(routes::catalog::delete_instance),
+            put(routes::catalog::update_instance).delete(routes::catalog::delete_instance),
         )
         .route(
             "/component-instances/{id}/jobs/discover",

@@ -327,7 +327,7 @@ async fn process_node(state: &AppState, n: &WorkNode) -> anyhow::Result<()> {
             }
         }
         "RUNNING" | "UNKNOWN" => {
-            let b = state
+            let b = match state
                 .jenkins
                 .build(
                     &n.jenkins_url,
@@ -337,17 +337,34 @@ async fn process_node(state: &AppState, n: &WorkNode) -> anyhow::Result<()> {
                     n.request_timeout_seconds as u64,
                     false,
                 )
-                .await?;
+                .await
+            {
+                Ok(build) => build,
+                Err(error) => {
+                    tracing::warn!(node_id=%n.id, error=%error, "Jenkins build status temporarily unavailable");
+                    sqlx::query("UPDATE gd_node_executions SET status='RUNNING',error_summary=$2,updated_at=now() WHERE id=$1")
+                        .bind(n.id)
+                        .bind(format!("Jenkins 状态查询暂时不可用：{}", sanitize(&error.to_string())))
+                        .execute(&state.db)
+                        .await?;
+                    return Ok(());
+                }
+            };
             if b.building {
                 sqlx::query(
-                    "UPDATE gd_node_executions SET status='RUNNING',updated_at=now() WHERE id=$1",
+                    "UPDATE gd_node_executions SET status='RUNNING',error_summary=NULL,updated_at=now() WHERE id=$1",
                 )
                 .bind(n.id)
                 .execute(&state.db)
                 .await?;
+            } else if let Some(result) = b.result {
+                let success = result == "SUCCESS";
+                sqlx::query("UPDATE gd_node_executions SET status=$2,finished_at=now(),error_summary=CASE WHEN $2='FAILED' THEN $3 ELSE NULL END,updated_at=now() WHERE id=$1").bind(n.id).bind(if success{"SUCCESS"}else{"FAILED"}).bind(format!("Jenkins 结果：{result}")).execute(&state.db).await?;
             } else {
-                let success = b.result.as_deref() == Some("SUCCESS");
-                sqlx::query("UPDATE gd_node_executions SET status=$2,finished_at=now(),error_summary=CASE WHEN $2='FAILED' THEN $3 ELSE NULL END,updated_at=now() WHERE id=$1").bind(n.id).bind(if success{"SUCCESS"}else{"FAILED"}).bind(format!("Jenkins 结果：{}",b.result.unwrap_or_else(||"UNKNOWN".into()))).execute(&state.db).await?;
+                sqlx::query("UPDATE gd_node_executions SET status='RUNNING',error_summary='Jenkins 尚未返回明确执行结果',updated_at=now() WHERE id=$1")
+                    .bind(n.id)
+                    .execute(&state.db)
+                    .await?;
             }
         }
         _ => {}
@@ -356,8 +373,12 @@ async fn process_node(state: &AppState, n: &WorkNode) -> anyhow::Result<()> {
 }
 
 async fn mark_unknown_or_failed(db: &PgPool, n: &WorkNode, error: String) -> anyhow::Result<()> {
-    let submitted = n.submitted_at.is_some() || n.status != "PENDING";
-    sqlx::query("UPDATE gd_node_executions SET status=$2,error_summary=$3,updated_at=now(),finished_at=CASE WHEN $2='FAILED' THEN now() ELSE finished_at END WHERE id=$1").bind(n.id).bind(if submitted{"UNKNOWN"}else{"FAILED"}).bind(sanitize(&error)).execute(db).await?;
+    let status = if n.submitted_at.is_some() || n.status != "PENDING" {
+        n.status.as_str()
+    } else {
+        "FAILED"
+    };
+    sqlx::query("UPDATE gd_node_executions SET status=$2,error_summary=$3,updated_at=now(),finished_at=CASE WHEN $2='FAILED' THEN now() ELSE finished_at END WHERE id=$1").bind(n.id).bind(status).bind(sanitize(&error)).execute(db).await?;
     Ok(())
 }
 
@@ -373,7 +394,7 @@ fn dependency_decision(keys: &[String], statuses: &HashMap<String, String>) -> D
         statuses.get(key).is_some_and(|status| {
             matches!(
                 status.as_str(),
-                "FAILED" | "CANCELED" | "TIMED_OUT" | "UNKNOWN" | "SKIPPED"
+                "FAILED" | "CANCELED" | "TIMED_OUT" | "SKIPPED"
             )
         })
     }) {
@@ -517,6 +538,16 @@ mod tests {
         assert_eq!(
             dependency_decision(&dependencies, &statuses),
             DependencyDecision::Skip
+        );
+    }
+
+    #[test]
+    fn temporarily_unknown_predecessor_keeps_downstream_waiting() {
+        let dependencies = vec!["build-a".to_owned()];
+        let statuses = HashMap::from([("build-a".to_owned(), "UNKNOWN".to_owned())]);
+        assert_eq!(
+            dependency_decision(&dependencies, &statuses),
+            DependencyDecision::Wait
         );
     }
 }
