@@ -47,6 +47,38 @@ cd frontend && npm run typecheck && npm run build
 cargo build --release
 ```
 
+### macOS 与 Windows 发布构建
+
+以下命令在 macOS 上生成 macOS Universal（arm64 + x86_64）和 Windows x86_64 可执行文件。首次构建前需要安装 Rust 编译目标和 MinGW-w64（`brew install mingw-w64`）。
+
+```bash
+rustup target add aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-gnu
+
+# 先构建需要嵌入可执行文件的前端资源
+cd frontend
+npm ci
+npm run build
+cd ..
+
+# 构建两种 macOS 架构和 Windows x86_64
+GOODNIGHT_SKIP_FRONTEND_BUILD=1 cargo build --release --target aarch64-apple-darwin
+GOODNIGHT_SKIP_FRONTEND_BUILD=1 cargo build --release --target x86_64-apple-darwin
+GOODNIGHT_SKIP_FRONTEND_BUILD=1 cargo build --release --target x86_64-pc-windows-gnu
+
+# 清理旧发布物，并生成不带版本号的裸可执行文件
+mkdir -p release
+find release -depth -mindepth 1 -delete
+lipo -create \
+  target/aarch64-apple-darwin/release/goodnight \
+  target/x86_64-apple-darwin/release/goodnight \
+  -output release/goodnight
+install -m 755 \
+  target/x86_64-pc-windows-gnu/release/goodnight.exe \
+  release/goodnight.exe
+```
+
+`release/` 最终只保留 `goodnight` 和 `goodnight.exe`，不打包为 zip。
+
 发布版可执行文件已经嵌入前端资源。应用启动时会先从当前工作目录或其父目录查找 `.env`，未找到时再读取可执行文件同目录下的 `.env`；也可以直接通过系统环境变量提供配置。系统环境变量优先于 `.env`。`APP_ENCRYPTION_KEYS` 始终必填，首次启动空数据库时还必须配置 `BOOTSTRAP_ADMIN_USERNAME` 与 `BOOTSTRAP_ADMIN_PASSWORD`。
 
 生产构建会把 `frontend/dist` 嵌入 Rust 二进制。健康检查位于 `/api/health`；Prometheus 文本指标位于 `/api/metrics`，请求需携带 `Authorization: Bearer <METRICS_TOKEN>`。
