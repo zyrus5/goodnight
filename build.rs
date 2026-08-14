@@ -5,6 +5,10 @@ use std::{
 };
 
 fn main() {
+    // sqlx::migrate! embeds migrations in the executable. Watching the directory
+    // ensures that adding a migration invalidates every release target instead of
+    // silently reusing a binary that contains an older migration set.
+    println!("cargo:rerun-if-changed=migrations");
     println!("cargo:rerun-if-changed=frontend/package.json");
     println!("cargo:rerun-if-changed=frontend/package-lock.json");
     println!("cargo:rerun-if-changed=frontend/index.html");

@@ -60,6 +60,9 @@ npm ci
 npm run build
 cd ..
 
+# 强制重新编译主程序，避免复用未嵌入新增 SQLx migration 的旧产物
+cargo clean -p goodnight
+
 # 构建两种 macOS 架构和 Windows x86_64
 GOODNIGHT_SKIP_FRONTEND_BUILD=1 cargo build --release --target aarch64-apple-darwin
 GOODNIGHT_SKIP_FRONTEND_BUILD=1 cargo build --release --target x86_64-apple-darwin
@@ -86,3 +89,15 @@ install -m 755 \
 生产构建会把 `frontend/dist` 嵌入 Rust 二进制。健康检查位于 `/api/health`；Prometheus 文本指标位于 `/api/metrics`，请求需携带 `Authorization: Bearer <METRICS_TOKEN>`。
 
 数据库结构由 `migrations/` 中的 SQLx migration 管理，应用启动时自动执行。历史任务版本、执行快照和审计日志不会被业务 API 删除。
+
+### 发布包迁移报错排查
+
+SQLx migration 会直接嵌入可执行文件，不需要把 `migrations/` 目录复制到发布目录。如果启动时报错：
+
+```text
+migration N was previously applied but is missing in the resolved migrations
+```
+
+说明数据库已经执行过第 N 个迁移，但当前可执行文件是未包含该迁移的旧构建。请按上面的完整发布流程重新构建，并确认最终复制的是 `target/x86_64-pc-windows-gnu/release/goodnight.exe`，而不是之前遗留在 `release/` 或其他目录中的旧文件。不要删除或修改数据库中的 `_sqlx_migrations` 记录。
+
+项目的 `build.rs` 会监听 `migrations/` 目录；新增迁移后会触发主程序重新编译。发布流程中的 `cargo clean -p goodnight` 是额外保护，用于避免多目标交叉编译时误用缓存产物。
