@@ -12,7 +12,7 @@ pub mod models;
 pub mod routes;
 
 use anyhow::Context;
-use std::sync::Arc;
+use std::{process::Command, sync::Arc};
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -44,10 +44,29 @@ pub async fn run() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind {}", config.address()))?;
     info!(address=%config.address(),"API server listening");
+    if config.open_browser {
+        open_browser(&config.host, config.port);
+    }
     axum::serve(listener, application)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("API server stopped unexpectedly")
+}
+fn open_browser(host: &str, port: u16) {
+    let browser_host = match host {
+        "0.0.0.0" | "::" => "127.0.0.1",
+        value => value,
+    };
+    let url = format!("http://{browser_host}:{port}");
+    #[cfg(target_os = "macos")]
+    let result = Command::new("open").arg(&url).spawn();
+    #[cfg(target_os = "windows")]
+    let result = Command::new("cmd").args(["/C", "start", "", &url]).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = Command::new("xdg-open").arg(&url).spawn();
+    if let Err(error) = result {
+        tracing::warn!(%error, %url, "failed to open browser");
+    }
 }
 fn load_dotenv() {
     if dotenvy::dotenv().is_ok() {

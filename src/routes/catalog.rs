@@ -21,7 +21,7 @@ use crate::{
 const COMPONENT_SELECT: &str = "SELECT c.id,c.code,c.name,c.is_public,c.is_active,c.version,COALESCE(string_agg(DISTINCT u.display_name,', ') FILTER(WHERE m.role='OWNER'),'') owner_names,COALESCE(string_agg(DISTINCT u.display_name,', ') FILTER(WHERE m.role='DEVELOPER'),'') developer_names,COALESCE(string_agg(DISTINCT u.display_name,', ') FILTER(WHERE m.role='TESTER'),'') tester_names,(array_agg(DISTINCT m.user_id) FILTER(WHERE m.role='OWNER'))[1] owner_id,COALESCE(array_agg(DISTINCT m.user_id) FILTER(WHERE m.role='DEVELOPER'),'{}') developer_ids,COALESCE(array_agg(DISTINCT m.user_id) FILTER(WHERE m.role='TESTER'),'{}') tester_ids,count(DISTINCT i.id) instance_count,c.created_at,c.updated_at FROM gd_components c LEFT JOIN gd_component_members m ON m.component_id=c.id LEFT JOIN gd_users u ON u.id=m.user_id LEFT JOIN gd_component_instances i ON i.component_id=c.id";
 const ENV_SELECT: &str = "SELECT e.id,e.customer_id,c.code customer_code,c.name customer_name,e.deployment_domain,e.code,e.name,e.jenkins_url,e.request_timeout_seconds,e.notes,e.is_active,e.version,e.created_at,e.updated_at FROM gd_environments e JOIN gd_customers c ON c.id=e.customer_id";
 const INSTANCE_SELECT: &str = "SELECT i.id,i.name,i.component_id,comp.name component_name,i.environment_id,e.name environment_name,e.customer_id,cu.name customer_name,e.deployment_domain,i.folder_full_name,i.folder_url,i.wiki_url,i.argo_url,i.apollo_url,i.log_url,i.status,i.notes,i.custom_fields,i.version,i.created_at,i.updated_at FROM gd_component_instances i JOIN gd_components comp ON comp.id=i.component_id JOIN gd_environments e ON e.id=i.environment_id JOIN gd_customers cu ON cu.id=e.customer_id";
-const JOB_SELECT: &str = "SELECT j.id,j.component_instance_id,i.name instance_name,i.component_id,c.name component_name,i.environment_id,e.name environment_name,e.customer_id,cu.name customer_name,e.deployment_domain,j.display_name,j.description,j.job_full_name,j.job_url,j.status,j.current_version,j.version,v.parameter_definitions,v.parameter_presets,j.created_at,j.updated_at FROM gd_job_configs j JOIN gd_component_instances i ON i.id=j.component_instance_id JOIN gd_components c ON c.id=i.component_id JOIN gd_environments e ON e.id=i.environment_id JOIN gd_customers cu ON cu.id=e.customer_id JOIN gd_job_config_versions v ON v.job_config_id=j.id AND v.version=j.current_version";
+const JOB_SELECT: &str = "SELECT j.id,j.user_id,j.component_instance_id,i.name instance_name,i.component_id,c.name component_name,i.environment_id,e.name environment_name,e.customer_id,cu.name customer_name,e.deployment_domain,j.display_name,j.description,j.job_full_name,j.job_url,j.status,j.current_version,j.version,v.parameter_definitions,v.parameter_presets,j.created_at,j.updated_at FROM gd_job_configs j JOIN gd_component_instances i ON i.id=j.component_instance_id JOIN gd_components c ON c.id=i.component_id JOIN gd_environments e ON e.id=i.environment_id JOIN gd_customers cu ON cu.id=e.customer_id JOIN gd_job_config_versions v ON v.job_config_id=j.id AND v.version=j.current_version";
 
 #[derive(Deserialize)]
 pub struct CustomerInput {
@@ -92,6 +92,28 @@ pub struct JobInput {
     #[serde(default = "empty_object")]
     parameter_presets: Value,
     version: Option<i32>,
+}
+#[derive(Deserialize)]
+pub struct JobSearchInput {
+    #[serde(default)]
+    q: String,
+    component_id: Option<Uuid>,
+    customer_id: Option<Uuid>,
+    user_id: Option<Uuid>,
+    #[serde(default)]
+    deployment_domain: String,
+    #[serde(default)]
+    environment_code: String,
+    #[serde(default = "one")]
+    page: i64,
+    #[serde(default = "twenty")]
+    page_size: i64,
+}
+fn one() -> i64 {
+    1
+}
+fn twenty() -> i64 {
+    20
 }
 #[derive(Deserialize)]
 pub struct InstanceJobInput {
@@ -693,6 +715,56 @@ pub async fn jobs(
         items,
         page: p.page.max(1),
         page_size: p.limit(),
+        total,
+    }))
+}
+pub async fn search_jobs(
+    State(s): State<AppState>,
+    u: CurrentUser,
+    Json(input): Json<JobSearchInput>,
+) -> ApiResult<Json<Page<JobConfigView>>> {
+    let pattern = format!("%{}%", input.q.trim());
+    let requested_user = input.user_id.or(Some(u.id));
+    let allowed_user = (!u.is_admin).then_some(u.id);
+    let domain = input.deployment_domain.trim();
+    let environment_code = input.environment_code.trim().to_ascii_lowercase();
+    let limit = input.page_size.clamp(1, 100);
+    let offset = (input.page.max(1) - 1) * limit;
+    let where_clause = "WHERE (j.display_name ILIKE $1 OR j.job_full_name ILIKE $1) AND ($2::uuid IS NULL OR i.component_id=$2) AND ($3::uuid IS NULL OR e.customer_id=$3) AND ($4='' OR e.code=$4) AND ($5::uuid IS NULL OR j.user_id=$5) AND ($6='' OR e.deployment_domain=$6) AND ($7::uuid IS NULL OR c.is_public OR EXISTS(SELECT 1 FROM gd_component_members m WHERE m.component_id=i.component_id AND m.user_id=$7))";
+    let total_sql = format!(
+        "SELECT count(*) FROM gd_job_configs j JOIN gd_component_instances i ON i.id=j.component_instance_id JOIN gd_components c ON c.id=i.component_id JOIN gd_environments e ON e.id=i.environment_id {where_clause}"
+    );
+    let total: i64 = sqlx::query_scalar(&total_sql)
+        .bind(&pattern)
+        .bind(input.component_id)
+        .bind(input.customer_id)
+        .bind(&environment_code)
+        .bind(requested_user)
+        .bind(domain)
+        .bind(allowed_user)
+        .fetch_one(&s.db)
+        .await?;
+    let query =
+        format!("{JOB_SELECT} {where_clause} ORDER BY j.updated_at DESC LIMIT $8 OFFSET $9");
+    let items = sqlx::query_as::<_, JobConfigView>(&query)
+        .bind(pattern)
+        .bind(input.component_id)
+        .bind(input.customer_id)
+        .bind(environment_code)
+        .bind(requested_user)
+        .bind(domain)
+        .bind(allowed_user)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&s.db)
+        .await?
+        .into_iter()
+        .map(mask_job)
+        .collect();
+    Ok(Json(Page {
+        items,
+        page: input.page.max(1),
+        page_size: limit,
         total,
     }))
 }

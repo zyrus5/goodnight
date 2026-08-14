@@ -40,6 +40,7 @@ export interface Field {
   full?: boolean;
   choices?: Choice[];
   options?: { endpoint: string; label: (row: Resource) => string };
+  defaultCurrentUser?: boolean;
 }
 export interface Filter {
   key: string;
@@ -108,7 +109,7 @@ export function ResourcePage({ config }: { config: ResourceConfig }) {
   useEffect(reload, [config.endpoint, q, page, filters]);
   useEffect(() => {
     for (const f of config.filters ?? []) {
-      if (f.options)
+      if (f.options && !isSearchableRelation(f.key))
         void getPage<Resource>(f.options.endpoint, "", 1, {
           page_size: 100,
         }).then((r) => setFilterOptions((o) => ({ ...o, [f.key]: r.items })));
@@ -183,6 +184,7 @@ export function ResourcePage({ config }: { config: ResourceConfig }) {
                     value: option.id,
                     label: f.options?.label(option) ?? option.id,
                   }))}
+                  loadOptions={(query) => loadRelationOptions(f.options!, query)}
                 />
               ) : f.type === "select" ? (
                 <select
@@ -428,23 +430,35 @@ function ResourceDialog({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const currentUser = useAppStore((state) => state.user);
   const createMode = !value || createFromCopy;
   const [form, setForm] = useState<Record<string, unknown>>(() =>
     Object.fromEntries(
       (config.fields ?? []).map((f) => [
         f.key,
         value?.[f.key] ??
+          (createMode && f.defaultCurrentUser ? currentUser?.id : undefined) ??
           f.defaultValue ??
           (f.type === "checkbox" ? false : f.type === "multiselect" ? [] : ""),
       ]),
     ),
   );
-  const [options, setOptions] = useState<Record<string, Resource[]>>({});
+  const [options, setOptions] = useState<Record<string, Resource[]>>(() =>
+    Object.fromEntries(
+      (config.fields ?? [])
+        .filter((field) => field.defaultCurrentUser && currentUser)
+        .map((field) => [field.key, [{
+          id: currentUser!.id,
+          display_name: currentUser!.display_name,
+          username: currentUser!.username,
+        } satisfies Resource]]),
+    ),
+  );
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     for (const f of config.fields ?? []) {
-      if (f.options)
+      if (f.options && !isSearchableRelation(f.key))
         void getPage<Resource>(f.options.endpoint, "", 1, {
           page_size: 100,
         }).then((r) => setOptions((o) => ({ ...o, [f.key]: r.items })));
@@ -545,20 +559,15 @@ function EnvironmentAssociationDialog({
 }) {
   const navigate = useNavigate();
   const [folders, setFolders] = useState<FolderItem[]>([]);
-  const [components, setComponents] = useState<Resource[]>([]);
   const [query, setQuery] = useState("");
   const [rows, setRows] = useState<AssociationRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
-    Promise.all([
-      http.get<FolderItem[]>(`/environments/${environment.id}/folders`),
-      getPage<Resource>("/components", "", 1, { page_size: 100 }),
-    ])
-      .then(([folderResponse, componentPage]) => {
+    http.get<FolderItem[]>(`/environments/${environment.id}/folders`)
+      .then((folderResponse) => {
         setFolders(flattenFolders(folderResponse.data));
-        setComponents(componentPage.items);
       })
       .catch((e) => setError(errorMessage(e)))
       .finally(() => setLoading(false));
@@ -568,8 +577,6 @@ function EnvironmentAssociationDialog({
       .toLowerCase()
       .includes(query.trim().toLowerCase()),
   );
-  const componentLabel = (component: Resource) =>
-    `${String(component.code)} · ${String(component.name)}`;
   const addFolder = (folder: FolderItem) =>
     setRows((current) =>
       current.some((row) => folderKey(row.folder) === folderKey(folder))
@@ -742,17 +749,18 @@ function EnvironmentAssociationDialog({
                             <small>{folderFullName(row.folder)}</small>
                           </td>
                           <td>
-                            <SearchableSelect
+            <SearchableSelect
                               ariaLabel="组件"
                               value={row.componentId}
                               placeholder="搜索并选择组件"
                               onChange={(componentId) =>
                                 updateRow(index, { componentId })
                               }
-                              options={components.map((component) => ({
-                                value: component.id,
-                                label: componentLabel(component),
-                              }))}
+                              options={[]}
+                              loadOptions={(query) => loadRelationOptions({
+                                endpoint: "/components",
+                                label: (component) => `${String(component.code)} · ${String(component.name)}`,
+                              }, query)}
                               required
                             />
                           </td>
@@ -843,7 +851,6 @@ function ManageJobsDialog({
   instance: Resource;
   onClose: () => void;
 }) {
-  const navigate = useNavigate();
   const [jobs, setJobs] = useState<JobItem[]>([]);
   const [savedJobs, setSavedJobs] = useState<Record<string, Resource>>({});
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
@@ -1032,7 +1039,7 @@ function ManageJobsDialog({
           });
         else if (!saved) await createResource("/job-configs", payload);
       }
-      navigate("/tasks/new");
+      onClose();
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -1296,6 +1303,7 @@ function FieldInput({
               value: option.id,
               label: field.options?.label(option) ?? option.id,
             }))}
+            loadOptions={field.options ? (query) => loadRelationOptions(field.options!, query) : undefined}
           />
         </label>
       );
@@ -1386,6 +1394,19 @@ function FieldInput({
     </label>
   );
 }
+
+async function loadRelationOptions(
+  relation: { endpoint: string; label: (row: Resource) => string },
+  query: string,
+) {
+  const page = await getPage<Resource>(relation.endpoint, query, 1, {
+    page_size: 20,
+  });
+  return page.items.map((item) => ({
+    value: item.id,
+    label: relation.label(item),
+  }));
+}
 function render(value: unknown) {
   if (typeof value === "boolean")
     return (
@@ -1407,5 +1428,6 @@ export const status = (value: unknown) =>
   );
 
 function isSearchableRelation(key: string) {
-  return key === "component_id" || key === "customer_id" || key === "owner_id";
+  return ["component_id", "customer_id", "environment_id", "owner_id", "user_id"]
+    .includes(key);
 }

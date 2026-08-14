@@ -95,6 +95,7 @@ const components: ResourceConfig = {
       label: "组件负责人",
       type: "select",
       required: true,
+      defaultCurrentUser: true,
       options: { endpoint: "/users", label: (r) => String(r.display_name) },
     },
     {

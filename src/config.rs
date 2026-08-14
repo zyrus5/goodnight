@@ -20,6 +20,7 @@ pub struct Config {
     pub global_concurrency: usize,
     pub per_jenkins_concurrency: usize,
     pub metrics_token: Option<String>,
+    pub open_browser: bool,
 }
 
 impl Config {
@@ -49,6 +50,7 @@ impl Config {
             global_concurrency: parse_env("GLOBAL_JOB_CONCURRENCY", 16_usize)?,
             per_jenkins_concurrency: parse_env("PER_JENKINS_CONCURRENCY", 4_usize)?,
             metrics_token: env::var("METRICS_TOKEN").ok(),
+            open_browser: parse_bool("OPEN_BROWSER", true)?,
         })
     }
 

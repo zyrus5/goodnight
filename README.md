@@ -81,6 +81,8 @@ install -m 755 \
 
 发布版可执行文件已经嵌入前端资源。应用启动时会先从当前工作目录或其父目录查找 `.env`，未找到时再读取可执行文件同目录下的 `.env`；也可以直接通过系统环境变量提供配置。系统环境变量优先于 `.env`。`APP_ENCRYPTION_KEYS` 始终必填，首次启动空数据库时还必须配置 `BOOTSTRAP_ADMIN_USERNAME` 与 `BOOTSTRAP_ADMIN_PASSWORD`。
 
+可执行文件启动成功后默认使用配置的 `APP_PORT` 自动打开浏览器；如需关闭该行为，可设置 `OPEN_BROWSER=false`。
+
 生产构建会把 `frontend/dist` 嵌入 Rust 二进制。健康检查位于 `/api/health`；Prometheus 文本指标位于 `/api/metrics`，请求需携带 `Authorization: Bearer <METRICS_TOKEN>`。
 
 数据库结构由 `migrations/` 中的 SQLx migration 管理，应用启动时自动执行。历史任务版本、执行快照和审计日志不会被业务 API 删除。

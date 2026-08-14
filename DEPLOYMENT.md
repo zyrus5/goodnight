@@ -35,6 +35,7 @@ Copy-Item .env.example .env
 其余参数均有默认值或属于可选功能，可以不配置：
 
 - `APP_PORT=3000`
+- `OPEN_BROWSER=true`：可执行文件启动后按 `APP_HOST`、`APP_PORT` 自动打开浏览器；设为 `false` 可关闭。
 - `FRONTEND_ORIGIN=http://localhost:5173`
 - `RUST_LOG=goodnight=debug,tower_http=info`
 - `BOOTSTRAP_ADMIN_DISPLAY_NAME=系统管理员`

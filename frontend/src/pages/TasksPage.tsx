@@ -50,6 +50,19 @@ export function TasksPage() {
     }
   }
 
+  async function togglePin(task: Resource) {
+    setBusyId(task.id);
+    setError("");
+    try {
+      await http.post(`/tasks/${task.id}/pin`);
+      load(query);
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setBusyId("");
+    }
+  }
+
   return (
     <>
       <div className="page-heading compact">
@@ -101,6 +114,7 @@ export function TasksPage() {
                 items.map((task) => (
                   <tr key={task.id}>
                     <td>
+                      {Boolean(task.pinned_at) && <span className="pin-marker" title="已置顶">◆</span>}
                       <strong>{String(task.name)}</strong>
                       <small className="cell-sub">
                         {String(task.description ?? "")}
@@ -125,6 +139,13 @@ export function TasksPage() {
                     </td>
                     <td>
                       <div className="row-actions">
+                        <button
+                          className={`link-button ${task.pinned_at ? "pin-active" : ""}`}
+                          disabled={busyId === task.id}
+                          onClick={() => void togglePin(task)}
+                        >
+                          {task.pinned_at ? "取消置顶" : "置顶"}
+                        </button>
                         <Link to={`/tasks/${task.id}`}>查看 / 编辑</Link>
                         <button
                           className="link-button"

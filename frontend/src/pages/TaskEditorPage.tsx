@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState, type DragEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { errorMessage, http } from "../lib/http";
-import { getPage, type Resource } from "../services/api";
+import { getPage, type Page, type Resource } from "../services/api";
 import { SearchableSelect } from "../components/SearchableSelect";
 
 interface NodeDef {
@@ -17,6 +17,7 @@ export function TaskEditorPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const [jobs, setJobs] = useState<Resource[]>([]);
+  const [jobTotal, setJobTotal] = useState(0);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [trigger, setTrigger] = useState("IMMEDIATE");
@@ -32,33 +33,9 @@ export function TaskEditorPage() {
   const [componentFilter, setComponentFilter] = useState("");
   const [customerFilter, setCustomerFilter] = useState("");
   const [deploymentDomainFilter, setDeploymentDomainFilter] = useState("");
-  const [environmentFilter, setEnvironmentFilter] = useState("");
+  const [environmentCodeFilter, setEnvironmentCodeFilter] = useState("");
 
   useEffect(() => {
-    void Promise.all([
-      getPage<Resource>("/job-configs", "", 1, { page_size: 100 }),
-      getPage<Resource>("/component-instances", "", 1, { page_size: 100 }),
-    ]).then(([jobPage, instancePage]) => {
-      const instances = new Map(
-        instancePage.items.map((instance) => [instance.id, instance]),
-      );
-      setJobs(
-        jobPage.items.map((job) => {
-          const instance = instances.get(String(job.component_instance_id));
-          return {
-            ...job,
-            component_name: job.component_name ?? instance?.component_name,
-            customer_id: job.customer_id ?? instance?.customer_id,
-            customer_name: job.customer_name ?? instance?.customer_name,
-            deployment_domain:
-              job.deployment_domain ?? instance?.deployment_domain,
-            environment_id: job.environment_id ?? instance?.environment_id,
-            environment_name:
-              job.environment_name ?? instance?.environment_name,
-          };
-        }),
-      );
-    });
     if (id)
       void http.get(`/tasks/${id}`).then(({ data }) => {
         setName(data.name);
@@ -72,6 +49,26 @@ export function TaskEditorPage() {
       });
   }, [id]);
   useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void http.post<Page<Resource>>("/job-configs/search", {
+        q: jobQuery,
+        component_id: componentFilter || null,
+        customer_id: customerFilter || null,
+        deployment_domain: deploymentDomainFilter,
+        environment_code: environmentCodeFilter,
+        page: 1,
+        page_size: 100,
+      })
+        .then((response) => {
+          setJobs(response.data.items);
+          setJobTotal(response.data.total);
+          setError("");
+        })
+        .catch((requestError) => setError(errorMessage(requestError)));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [jobQuery, componentFilter, customerFilter, deploymentDomainFilter, environmentCodeFilter]);
+  useEffect(() => {
     if (trigger === "CRON")
       void http
         .post("/tasks/cron-preview", { cron_expression: cron, timezone })
@@ -79,29 +76,7 @@ export function TaskEditorPage() {
         .catch(() => setPreview([]));
   }, [trigger, cron, timezone]);
 
-  const components = uniqueOptions(jobs, "component_id", "component_name");
-  const customers = uniqueOptions(jobs, "customer_id", "customer_name");
-  const deploymentDomains = uniqueOptions(
-    jobs,
-    "deployment_domain",
-    "deployment_domain",
-  );
-  const environments = uniqueOptions(
-    jobs,
-    "environment_id",
-    "environment_name",
-  );
-  const visibleJobs = jobs.filter(
-    (job) =>
-      (!componentFilter || job.component_id === componentFilter) &&
-      (!customerFilter || job.customer_id === customerFilter) &&
-      (!deploymentDomainFilter ||
-        job.deployment_domain === deploymentDomainFilter) &&
-      (!environmentFilter || job.environment_id === environmentFilter) &&
-      `${job.display_name} ${job.instance_name} ${job.job_full_name} ${job.customer_name} ${job.environment_name} ${job.deployment_domain}`
-        .toLowerCase()
-        .includes(jobQuery.trim().toLowerCase()),
-  );
+  const visibleJobs = jobs;
   const levels = useMemo(() => topologicalLevels(nodes), [nodes]);
 
   function nodeFor(job: Resource, dependencies: string[]): NodeDef {
@@ -209,6 +184,7 @@ export function TaskEditorPage() {
         </div>
       </div>
       {error && <div className="alert error">{error}</div>}
+      <div className="task-editor-layout">
       <section className="panel task-meta">
         <label>
           任务名称
@@ -284,7 +260,7 @@ export function TaskEditorPage() {
           <div className="panel-title">
             <strong>可用 Job</strong>
             <span>
-              {visibleJobs.length} / {jobs.length}
+              {visibleJobs.length} / {jobTotal}
             </span>
           </div>
           <div className="job-palette-filters">
@@ -299,7 +275,8 @@ export function TaskEditorPage() {
               onChange={setComponentFilter}
               placeholder="搜索组件"
               emptyLabel="全部组件"
-              options={components}
+              options={[]}
+              loadOptions={(query) => resourceOptions("/components", query, (row) => `${row.code} · ${row.name}`)}
             />
             <SearchableSelect
               ariaLabel="客户"
@@ -307,7 +284,8 @@ export function TaskEditorPage() {
               onChange={setCustomerFilter}
               placeholder="搜索客户"
               emptyLabel="全部客户"
-              options={customers}
+              options={[]}
+              loadOptions={(query) => resourceOptions("/customers", query, (row) => `${row.code} · ${row.name}`)}
             />
             <SearchableSelect
               ariaLabel="部署域"
@@ -315,15 +293,16 @@ export function TaskEditorPage() {
               onChange={setDeploymentDomainFilter}
               placeholder="搜索部署域"
               emptyLabel="全部部署域"
-              options={deploymentDomains}
+              options={[]}
+              loadOptions={deploymentDomainOptions}
             />
             <SearchableSelect
-              ariaLabel="环境"
-              value={environmentFilter}
-              onChange={setEnvironmentFilter}
-              placeholder="搜索环境"
-              emptyLabel="全部环境"
-              options={environments}
+              ariaLabel="环境代码"
+              value={environmentCodeFilter}
+              onChange={setEnvironmentCodeFilter}
+              placeholder="选择环境代码"
+              emptyLabel="全部环境代码"
+              options={environmentCodeOptions}
             />
           </div>
           <div className="job-palette-list">
@@ -357,7 +336,7 @@ export function TaskEditorPage() {
         </aside>
         <section className="canvas panel">
           <div className="panel-title">
-            <strong>并行编排流程</strong>
+            <strong>任务流程</strong>
             <span>
               {nodes.length} 个节点 · {levels.length} 层
             </span>
@@ -511,22 +490,31 @@ export function TaskEditorPage() {
           )}
         </section>
       </div>
+      </div>
     </form>
   );
 }
 
-function uniqueOptions(items: Resource[], valueKey: string, labelKey: string) {
-  return [
-    ...new Map(
-      items
-        .filter((item) => item[valueKey])
-        .map((item) => [
-          String(item[valueKey]),
-          String(item[labelKey] ?? item[valueKey]),
-        ]),
-    ).entries(),
-  ].map(([value, label]) => ({ value, label }));
+async function resourceOptions(
+  endpoint: string,
+  query: string,
+  label: (row: Resource) => string,
+) {
+  const page = await getPage<Resource>(endpoint, query, 1, { page_size: 20 });
+  return page.items.map((row) => ({ value: row.id, label: label(row) }));
 }
+async function deploymentDomainOptions(query: string) {
+  const page = await getPage<Resource>("/environments", query, 1, { page_size: 100 });
+  return [...new Set(page.items.map((row) => String(row.deployment_domain)).filter(Boolean))]
+    .map((value) => ({ value, label: value }));
+}
+const environmentCodeOptions = [
+  { value: "dev", label: "dev · 开发" },
+  { value: "test", label: "test · 测试" },
+  { value: "uat", label: "uat · 验收" },
+  { value: "branch", label: "branch · 分支" },
+  { value: "prod", label: "prod · 生产" },
+];
 function topologicalLevels(nodes: NodeDef[]) {
   const remaining = new Map(nodes.map((node) => [node.key, node]));
   const done = new Set<string>();

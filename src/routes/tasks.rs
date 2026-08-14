@@ -24,7 +24,7 @@ use crate::{
     models::{ExecutionView, NodeExecutionView, Page, PageQuery, TaskView},
 };
 
-const TASK_SELECT: &str = "SELECT t.id,t.name,t.description,t.creator_id,u.display_name creator_name,t.trigger_type,t.scheduled_at,t.cron_expression,t.timezone,t.is_enabled,t.current_version,t.version,t.next_run_at,v.definition,t.created_at,t.updated_at FROM gd_tasks t JOIN gd_users u ON u.id=t.creator_id JOIN gd_task_versions v ON v.task_id=t.id AND v.version=t.current_version";
+const TASK_SELECT: &str = "SELECT t.id,t.name,t.description,t.creator_id,u.display_name creator_name,t.trigger_type,t.scheduled_at,t.cron_expression,t.timezone,t.is_enabled,t.current_version,t.version,t.next_run_at,t.pinned_at,v.definition,t.created_at,t.updated_at FROM gd_tasks t JOIN gd_users u ON u.id=t.creator_id JOIN gd_task_versions v ON v.task_id=t.id AND v.version=t.current_version";
 const EXEC_SELECT: &str = "SELECT e.id,e.task_id,t.name task_name,e.task_version,e.trigger_type,e.status,e.snapshot,e.scheduled_at,e.started_at,e.finished_at,e.created_at FROM gd_executions e JOIN gd_tasks t ON t.id=e.task_id";
 
 #[derive(Deserialize)]
@@ -70,7 +70,7 @@ pub async fn list(
         .await?
     };
     let q = format!(
-        "{TASK_SELECT} WHERE NOT t.is_deleted AND t.name ILIKE $1 AND ($2::uuid IS NULL OR t.user_id=$2) ORDER BY t.updated_at DESC LIMIT $3 OFFSET $4"
+        "{TASK_SELECT} WHERE NOT t.is_deleted AND t.name ILIKE $1 AND ($2::uuid IS NULL OR t.user_id=$2) ORDER BY t.pinned_at IS NULL,t.pinned_at ASC,t.created_at DESC LIMIT $3 OFFSET $4"
     );
     let items = sqlx::query_as(&q)
         .bind(pat)
@@ -207,6 +207,20 @@ pub async fn toggle(
     .execute(&s.db)
     .await?;
     audit::record(&s.db, Some(u.id), "TOGGLE", "TASK", Some(id), json!({})).await;
+    Ok(Json(task_by_id(&s, &u, id).await?))
+}
+pub async fn toggle_pin(
+    State(s): State<AppState>,
+    u: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<TaskView>> {
+    let task = task_by_id(&s, &u, id).await?;
+    if !u.is_admin && task.creator_id != u.id {
+        return Err(ApiError::forbidden());
+    }
+    sqlx::query("UPDATE gd_tasks SET pinned_at=CASE WHEN pinned_at IS NULL THEN now() ELSE NULL END WHERE id=$1")
+        .bind(id).execute(&s.db).await?;
+    audit::record(&s.db, Some(u.id), "PIN", "TASK", Some(id), json!({})).await;
     Ok(Json(task_by_id(&s, &u, id).await?))
 }
 pub async fn delete_task(
@@ -553,7 +567,7 @@ async fn validate_definition_permissions(
 ) -> ApiResult<()> {
     for node in d.get("nodes").and_then(Value::as_array).unwrap_or(&vec![]) {
         let jid = parse_uuid(node.get("job_config_id"))?;
-        let cid:Option<Uuid>=sqlx::query_scalar("SELECT i.component_id FROM gd_job_configs j JOIN gd_component_instances i ON i.id=j.component_instance_id JOIN gd_environments e ON e.id=i.environment_id WHERE j.id=$1 AND j.status='ACTIVE' AND i.status='ACTIVE' AND e.is_active AND ($2::uuid IS NULL OR j.user_id=$2)").bind(jid).bind(if u.is_admin { None } else { Some(u.id) }).fetch_optional(&s.db).await?;
+        let cid:Option<Uuid>=sqlx::query_scalar("SELECT i.component_id FROM gd_job_configs j JOIN gd_component_instances i ON i.id=j.component_instance_id JOIN gd_environments e ON e.id=i.environment_id WHERE j.id=$1 AND j.status='ACTIVE' AND i.status='ACTIVE' AND e.is_active").bind(jid).fetch_optional(&s.db).await?;
         let cid = cid
             .ok_or_else(|| ApiError::bad_request("JOB_UNAVAILABLE", "任务包含不可用的 Job 配置"))?;
         crate::auth::component_permission(&s.db, u, cid, false).await?;

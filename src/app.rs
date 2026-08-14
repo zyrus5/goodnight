@@ -119,6 +119,7 @@ pub fn router(state: AppState) -> Router {
             "/job-configs",
             get(routes::catalog::jobs).post(routes::catalog::create_job),
         )
+        .route("/job-configs/search", post(routes::catalog::search_jobs))
         .route("/job-configs/{id}", put(routes::catalog::update_job))
         .route("/job-configs/{id}/sync", post(routes::catalog::sync_job))
         .route(
@@ -133,6 +134,7 @@ pub fn router(state: AppState) -> Router {
                 .delete(routes::tasks::delete_task),
         )
         .route("/tasks/{id}/toggle", post(routes::tasks::toggle))
+        .route("/tasks/{id}/pin", post(routes::tasks::toggle_pin))
         .route("/tasks/{id}/run", post(routes::tasks::run))
         .route("/executions", get(routes::tasks::executions))
         .route(

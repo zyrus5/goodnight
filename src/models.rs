@@ -178,6 +178,7 @@ pub struct InstanceView {
 #[derive(Debug, Serialize, FromRow)]
 pub struct JobConfigView {
     pub id: Uuid,
+    pub user_id: Uuid,
     pub component_instance_id: Uuid,
     pub instance_name: String,
     pub component_id: Uuid,
@@ -215,6 +216,7 @@ pub struct TaskView {
     pub current_version: i32,
     pub version: i32,
     pub next_run_at: Option<DateTime<Utc>>,
+    pub pinned_at: Option<DateTime<Utc>>,
     pub definition: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

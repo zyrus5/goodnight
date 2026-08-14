@@ -15,6 +15,7 @@ interface SearchableSelectProps {
   disabled?: boolean;
   required?: boolean;
   className?: string;
+  loadOptions?: (query: string) => Promise<SearchableOption[]>;
 }
 
 export function SearchableSelect({
@@ -27,10 +28,28 @@ export function SearchableSelect({
   disabled = false,
   required = false,
   className = "",
+  loadOptions,
 }: SearchableSelectProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const selected = options.find((option) => option.value === value);
+  const [remoteOptions, setRemoteOptions] = useState<SearchableOption[]>([]);
+  const [loading, setLoading] = useState(false);
+  const allOptions = loadOptions ? remoteOptions : options;
+  const selected = [...options, ...remoteOptions].find(
+    (option) => option.value === value,
+  );
+
+  useEffect(() => {
+    if (!open || !loadOptions) return;
+    const keyword = selected?.label === query ? "" : query;
+    const timer = window.setTimeout(() => {
+      setLoading(true);
+      void loadOptions(keyword)
+        .then((items) => setRemoteOptions(items))
+        .finally(() => setLoading(false));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [open, query, selected?.label]);
 
   useEffect(() => {
     if (!open) setQuery(selected?.label ?? "");
@@ -38,11 +57,11 @@ export function SearchableSelect({
 
   const visible = useMemo(() => {
     const keyword = query.trim().toLowerCase();
-    if (!keyword || selected?.label === query) return options;
-    return options.filter((option) =>
+    if (loadOptions || !keyword || selected?.label === query) return allOptions;
+    return allOptions.filter((option) =>
       option.label.toLowerCase().includes(keyword),
     );
-  }, [options, query, selected?.label]);
+  }, [allOptions, loadOptions, query, selected?.label]);
 
   function choose(option?: SearchableOption) {
     onChange(option?.value ?? "");
@@ -122,7 +141,9 @@ export function SearchableSelect({
             </button>
           ))}
           {visible.length === 0 && (
-            <span className="searchable-select-empty">没有匹配项</span>
+            <span className="searchable-select-empty">
+              {loading ? "正在查询…" : "没有匹配项"}
+            </span>
           )}
         </div>
       )}
