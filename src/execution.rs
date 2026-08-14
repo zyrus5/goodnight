@@ -17,11 +17,13 @@ struct WorkNode {
     parameters: Value,
     timeout_seconds: i32,
     queue_id: Option<i64>,
+    queue_url: Option<String>,
     build_number: Option<i64>,
     submitted_at: Option<DateTime<Utc>>,
     jenkins_url: String,
     request_timeout_seconds: i32,
     job_full_name: String,
+    job_url: Option<String>,
     environment_id: Uuid,
 }
 
@@ -34,7 +36,7 @@ pub async fn create_execution(
     actor: Option<Uuid>,
     scheduled_at: Option<DateTime<Utc>>,
 ) -> ApiResult<Uuid> {
-    let definition: Value = sqlx::query_scalar(
+    let mut definition: Value = sqlx::query_scalar(
         "SELECT definition FROM gd_task_versions WHERE task_id=$1 AND version=$2",
     )
     .bind(task_id)
@@ -42,6 +44,7 @@ pub async fn create_execution(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::not_found("任务版本不存在"))?;
+    crate::routes::tasks::normalize_level_dependencies(&mut definition)?;
     let status = if scheduled_at.is_some_and(|t| t > Utc::now()) {
         "SCHEDULED"
     } else {
@@ -104,23 +107,31 @@ pub async fn request_cancel(state: &AppState, id: Uuid) -> ApiResult<()> {
     if status.is_none() {
         return Err(ApiError::conflict("执行已结束，不能停止"));
     }
-    let builds = sqlx::query_as::<_, (String, String, i32, i64)>(
-        "SELECT e.jenkins_url,j.job_full_name,e.request_timeout_seconds,n.build_number FROM gd_node_executions n JOIN gd_environments e ON e.id=n.environment_id JOIN gd_job_configs j ON j.id=n.job_config_id WHERE n.execution_id=$1 AND n.status IN('RUNNING','UNKNOWN') AND n.build_number IS NOT NULL",
+    let builds = sqlx::query_as::<_, (String, String, Option<String>, i32, i64)>(
+        "SELECT e.jenkins_url,j.job_full_name,j.job_url,e.request_timeout_seconds,n.build_number FROM gd_node_executions n JOIN gd_environments e ON e.id=n.environment_id JOIN gd_job_configs j ON j.id=n.job_config_id WHERE n.execution_id=$1 AND n.status IN('RUNNING','UNKNOWN') AND n.build_number IS NOT NULL",
     )
     .bind(id)
     .fetch_all(&state.db)
     .await?;
-    for (jenkins_url, job_full_name, timeout, build_number) in builds {
-        let _ = state
-            .jenkins
-            .stop_build(
-                &jenkins_url,
-                &job_full_name,
-                build_number,
-                timeout as u64,
-                false,
-            )
-            .await;
+    for (jenkins_url, job_full_name, job_url, timeout, build_number) in builds {
+        let result = if let Some(job_url) = job_url {
+            state
+                .jenkins
+                .stop_build_at(&job_url, build_number, timeout as u64, false)
+                .await
+        } else {
+            state
+                .jenkins
+                .stop_build(
+                    &jenkins_url,
+                    &job_full_name,
+                    build_number,
+                    timeout as u64,
+                    false,
+                )
+                .await
+        };
+        let _ = result;
     }
     sqlx::query("UPDATE gd_node_executions SET status='CANCELED',finished_at=now(),updated_at=now() WHERE execution_id=$1 AND status IN('PENDING','WAITING_DEPENDENCY','QUEUED','RUNNING','UNKNOWN')").bind(id).execute(&state.db).await?;
     sqlx::query("UPDATE gd_executions SET status='CANCELED',finished_at=now() WHERE id=$1")
@@ -207,7 +218,7 @@ async fn worker_tick(state: &AppState) -> anyhow::Result<()> {
         .config
         .global_concurrency
         .saturating_sub(running as usize);
-    let mut nodes=sqlx::query_as::<_,WorkNode>("SELECT n.id,n.status,n.parameters,n.timeout_seconds,n.queue_id,n.build_number,n.submitted_at,e.jenkins_url,e.request_timeout_seconds,j.job_full_name,n.environment_id FROM gd_node_executions n JOIN gd_executions x ON x.id=n.execution_id JOIN gd_environments e ON e.id=n.environment_id JOIN gd_job_configs j ON j.id=n.job_config_id WHERE x.status='RUNNING' AND x.user_id=$1 AND n.status IN('PENDING','QUEUED','RUNNING','UNKNOWN') AND (n.claim_expires_at IS NULL OR n.claim_expires_at<now()) ORDER BY CASE n.status WHEN 'RUNNING' THEN 0 WHEN 'UNKNOWN' THEN 1 WHEN 'QUEUED' THEN 2 ELSE 3 END,n.updated_at LIMIT 100").bind(worker_user_id).fetch_all(&state.db).await?;
+    let mut nodes=sqlx::query_as::<_,WorkNode>("SELECT n.id,n.status,n.parameters,n.timeout_seconds,n.queue_id,n.queue_url,n.build_number,n.submitted_at,e.jenkins_url,e.request_timeout_seconds,j.job_full_name,j.job_url,n.environment_id FROM gd_node_executions n JOIN gd_executions x ON x.id=n.execution_id JOIN gd_environments e ON e.id=n.environment_id JOIN gd_job_configs j ON j.id=n.job_config_id WHERE x.status='RUNNING' AND x.user_id=$1 AND n.status IN('PENDING','QUEUED','RUNNING','UNKNOWN') AND (n.claim_expires_at IS NULL OR n.claim_expires_at<now()) ORDER BY CASE n.status WHEN 'RUNNING' THEN 0 WHEN 'UNKNOWN' THEN 1 WHEN 'QUEUED' THEN 2 ELSE 3 END,n.updated_at LIMIT 100").bind(worker_user_id).fetch_all(&state.db).await?;
     let mut submitted = 0;
     for node in nodes.drain(..) {
         if node.status == "PENDING" && submitted >= capacity {
@@ -263,15 +274,22 @@ async fn process_node(state: &AppState, n: &WorkNode) -> anyhow::Result<()> {
             .bind(n.id)
             .fetch_one(&state.db)
             .await?;
-            let raw_definition = state
-                .jenkins
-                .job_definition(
-                    &n.jenkins_url,
-                    &n.job_full_name,
-                    n.request_timeout_seconds as u64,
-                    false,
-                )
-                .await?;
+            let raw_definition = if let Some(job_url) = &n.job_url {
+                state
+                    .jenkins
+                    .job_definition_at(job_url, n.request_timeout_seconds as u64, false)
+                    .await?
+            } else {
+                state
+                    .jenkins
+                    .job_definition(
+                        &n.jenkins_url,
+                        &n.job_full_name,
+                        n.request_timeout_seconds as u64,
+                        false,
+                    )
+                    .await?
+            };
             let latest = crate::routes::catalog::extract_parameter_definitions(&raw_definition);
             let comparison =
                 crate::routes::catalog::compare_definitions(&saved_definitions, &latest);
@@ -293,34 +311,62 @@ async fn process_node(state: &AppState, n: &WorkNode) -> anyhow::Result<()> {
                 return Ok(());
             }
             let parameters = state.crypto.decrypt_parameters(&n.parameters)?;
-            let location = state
-                .jenkins
-                .trigger(
-                    &n.jenkins_url,
-                    &n.job_full_name,
-                    &parameters,
-                    n.request_timeout_seconds as u64,
-                    false,
-                )
-                .await?;
+            let location = if let Some(job_url) = &n.job_url {
+                let jenkins_base = state.jenkins.base_url_for_job(job_url).await?;
+                state
+                    .jenkins
+                    .trigger_at(
+                        job_url,
+                        &jenkins_base,
+                        &parameters,
+                        n.request_timeout_seconds as u64,
+                        false,
+                    )
+                    .await?
+            } else {
+                state
+                    .jenkins
+                    .trigger(
+                        &n.jenkins_url,
+                        &n.job_full_name,
+                        &parameters,
+                        n.request_timeout_seconds as u64,
+                        false,
+                    )
+                    .await?
+            };
             let qid = location
                 .trim_end_matches('/')
                 .rsplit('/')
                 .next()
                 .and_then(|v| v.parse::<i64>().ok())
                 .ok_or_else(|| anyhow::anyhow!("无法从 Location 解析 queue id"))?;
-            sqlx::query("UPDATE gd_node_executions SET status='QUEUED',queue_id=$2,queue_url=$3,submitted_at=now(),updated_at=now() WHERE id=$1").bind(n.id).bind(qid).bind(location).execute(&state.db).await?;
+            let mut tx = state.db.begin().await?;
+            sqlx::query("UPDATE gd_node_executions SET status='QUEUED',queue_id=$2,queue_url=$3,submitted_at=now(),updated_at=now() WHERE id=$1").bind(n.id).bind(qid).bind(location).execute(&mut *tx).await?;
+            sqlx::query("UPDATE gd_job_configs SET latest_parameter_presets=$2,updated_at=now() WHERE id=$1")
+                .bind(job_config_id)
+                .bind(&n.parameters)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
         }
         "QUEUED" | "UNKNOWN" if n.build_number.is_none() => {
-            let q = state
-                .jenkins
-                .queue(
-                    &n.jenkins_url,
-                    n.queue_id.ok_or_else(|| anyhow::anyhow!("queue id 丢失"))?,
-                    n.request_timeout_seconds as u64,
-                    false,
-                )
-                .await?;
+            let q = if let Some(queue_url) = &n.queue_url {
+                state
+                    .jenkins
+                    .queue_at(queue_url, n.request_timeout_seconds as u64, false)
+                    .await?
+            } else {
+                state
+                    .jenkins
+                    .queue(
+                        &n.jenkins_url,
+                        n.queue_id.ok_or_else(|| anyhow::anyhow!("queue id 丢失"))?,
+                        n.request_timeout_seconds as u64,
+                        false,
+                    )
+                    .await?
+            };
             if q.cancelled == Some(true) {
                 sqlx::query("UPDATE gd_node_executions SET status='CANCELED',finished_at=now(),updated_at=now() WHERE id=$1").bind(n.id).execute(&state.db).await?;
             } else if let Some(x) = q.executable {
@@ -330,18 +376,32 @@ async fn process_node(state: &AppState, n: &WorkNode) -> anyhow::Result<()> {
             }
         }
         "RUNNING" | "UNKNOWN" => {
-            let b = match state
-                .jenkins
-                .build(
-                    &n.jenkins_url,
-                    &n.job_full_name,
-                    n.build_number
-                        .ok_or_else(|| anyhow::anyhow!("build number 丢失"))?,
-                    n.request_timeout_seconds as u64,
-                    false,
-                )
-                .await
-            {
+            let build_number = n
+                .build_number
+                .ok_or_else(|| anyhow::anyhow!("build number 丢失"))?;
+            let build_result = if let Some(job_url) = &n.job_url {
+                state
+                    .jenkins
+                    .build_at(
+                        job_url,
+                        build_number,
+                        n.request_timeout_seconds as u64,
+                        false,
+                    )
+                    .await
+            } else {
+                state
+                    .jenkins
+                    .build(
+                        &n.jenkins_url,
+                        &n.job_full_name,
+                        build_number,
+                        n.request_timeout_seconds as u64,
+                        false,
+                    )
+                    .await
+            };
+            let b = match build_result {
                 Ok(build) => build,
                 Err(error) => {
                     tracing::warn!(node_id=%n.id, error=%error, "Jenkins build status temporarily unavailable");

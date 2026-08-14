@@ -104,6 +104,10 @@ pub fn router(state: AppState) -> Router {
             get(routes::catalog::discover_jobs),
         )
         .route(
+            "/component-instances/{id}/jobs/manual",
+            post(routes::catalog::add_manual_workflow_job),
+        )
+        .route(
             "/component-instances/{id}/jobs/preview",
             post(routes::catalog::preview_instance_job),
         )

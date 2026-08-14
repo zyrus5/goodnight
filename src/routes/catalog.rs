@@ -21,7 +21,7 @@ use crate::{
 const COMPONENT_SELECT: &str = "SELECT c.id,c.code,c.name,c.is_public,c.is_active,c.version,COALESCE(string_agg(DISTINCT u.display_name,', ') FILTER(WHERE m.role='OWNER'),'') owner_names,COALESCE(string_agg(DISTINCT u.display_name,', ') FILTER(WHERE m.role='DEVELOPER'),'') developer_names,COALESCE(string_agg(DISTINCT u.display_name,', ') FILTER(WHERE m.role='TESTER'),'') tester_names,(array_agg(DISTINCT m.user_id) FILTER(WHERE m.role='OWNER'))[1] owner_id,COALESCE(array_agg(DISTINCT m.user_id) FILTER(WHERE m.role='DEVELOPER'),'{}') developer_ids,COALESCE(array_agg(DISTINCT m.user_id) FILTER(WHERE m.role='TESTER'),'{}') tester_ids,count(DISTINCT i.id) instance_count,c.created_at,c.updated_at FROM gd_components c LEFT JOIN gd_component_members m ON m.component_id=c.id LEFT JOIN gd_users u ON u.id=m.user_id LEFT JOIN gd_component_instances i ON i.component_id=c.id";
 const ENV_SELECT: &str = "SELECT e.id,e.customer_id,c.code customer_code,c.name customer_name,e.deployment_domain,e.code,e.name,e.jenkins_url,e.request_timeout_seconds,e.notes,e.is_active,e.version,e.created_at,e.updated_at FROM gd_environments e JOIN gd_customers c ON c.id=e.customer_id";
 const INSTANCE_SELECT: &str = "SELECT i.id,i.name,i.component_id,comp.name component_name,i.environment_id,e.name environment_name,e.customer_id,cu.name customer_name,e.deployment_domain,i.folder_full_name,i.folder_url,i.wiki_url,i.argo_url,i.apollo_url,i.log_url,i.status,i.notes,i.custom_fields,i.version,i.created_at,i.updated_at FROM gd_component_instances i JOIN gd_components comp ON comp.id=i.component_id JOIN gd_environments e ON e.id=i.environment_id JOIN gd_customers cu ON cu.id=e.customer_id";
-const JOB_SELECT: &str = "SELECT j.id,j.user_id,j.component_instance_id,i.name instance_name,i.component_id,c.name component_name,i.environment_id,e.name environment_name,e.customer_id,cu.name customer_name,e.deployment_domain,j.display_name,j.description,j.job_full_name,j.job_url,j.status,j.current_version,j.version,v.parameter_definitions,v.parameter_presets,j.created_at,j.updated_at FROM gd_job_configs j JOIN gd_component_instances i ON i.id=j.component_instance_id JOIN gd_components c ON c.id=i.component_id JOIN gd_environments e ON e.id=i.environment_id JOIN gd_customers cu ON cu.id=e.customer_id JOIN gd_job_config_versions v ON v.job_config_id=j.id AND v.version=j.current_version";
+const JOB_SELECT: &str = "SELECT j.id,j.component_instance_id,i.name instance_name,i.component_id,c.name component_name,i.environment_id,e.name environment_name,e.customer_id,cu.name customer_name,e.deployment_domain,j.display_name,j.description,j.job_full_name,j.job_url,j.status,j.current_version,j.version,v.parameter_definitions,COALESCE(j.latest_parameter_presets,v.parameter_presets) parameter_presets,j.created_at,j.updated_at FROM gd_job_configs j JOIN gd_component_instances i ON i.id=j.component_instance_id JOIN gd_components c ON c.id=i.component_id JOIN gd_environments e ON e.id=i.environment_id JOIN gd_customers cu ON cu.id=e.customer_id JOIN gd_job_config_versions v ON v.job_config_id=j.id AND v.version=j.current_version";
 
 #[derive(Deserialize)]
 pub struct CustomerInput {
@@ -99,7 +99,7 @@ pub struct JobSearchInput {
     q: String,
     component_id: Option<Uuid>,
     customer_id: Option<Uuid>,
-    user_id: Option<Uuid>,
+    component_instance_id: Option<Uuid>,
     #[serde(default)]
     deployment_domain: String,
     #[serde(default)]
@@ -108,6 +108,10 @@ pub struct JobSearchInput {
     page: i64,
     #[serde(default = "twenty")]
     page_size: i64,
+}
+#[derive(Deserialize)]
+pub struct ManualWorkflowJobInput {
+    job_url: String,
 }
 fn one() -> i64 {
     1
@@ -128,6 +132,7 @@ pub struct InstanceJobTestInput {
 #[derive(Deserialize)]
 pub struct InstanceJobQueueInput {
     queue_id: i64,
+    queue_url: Option<String>,
 }
 fn yes() -> bool {
     true
@@ -665,6 +670,10 @@ pub async fn delete_instance(
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM gd_manual_workflow_jobs WHERE component_instance_id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM gd_component_instances WHERE id=$1")
         .bind(id)
         .execute(&mut *tx)
@@ -696,14 +705,14 @@ pub async fn jobs(
     Query(p): Query<PageQuery>,
 ) -> ApiResult<Json<Page<JobConfigView>>> {
     let pat = p.pattern();
-    let uid = (!u.is_admin).then_some(u.id);
-    let total=sqlx::query_scalar("SELECT count(*) FROM gd_job_configs j WHERE (j.display_name ILIKE $1 OR j.job_full_name ILIKE $1) AND ($2::uuid IS NULL OR j.user_id=$2)").bind(&pat).bind(uid).fetch_one(&s.db).await?;
+    let allowed_user = (!u.is_admin).then_some(u.id);
+    let total=sqlx::query_scalar("SELECT count(*) FROM gd_job_configs j JOIN gd_component_instances i ON i.id=j.component_instance_id JOIN gd_components c ON c.id=i.component_id WHERE (j.display_name ILIKE $1 OR j.job_full_name ILIKE $1) AND ($2::uuid IS NULL OR c.is_public OR EXISTS(SELECT 1 FROM gd_component_members m WHERE m.component_id=i.component_id AND m.user_id=$2))").bind(&pat).bind(allowed_user).fetch_one(&s.db).await?;
     let q = format!(
-        "{JOB_SELECT} WHERE (j.display_name ILIKE $1 OR j.job_full_name ILIKE $1) AND ($2::uuid IS NULL OR j.user_id=$2) ORDER BY j.updated_at DESC LIMIT $3 OFFSET $4"
+        "{JOB_SELECT} WHERE (j.display_name ILIKE $1 OR j.job_full_name ILIKE $1) AND ($2::uuid IS NULL OR c.is_public OR EXISTS(SELECT 1 FROM gd_component_members m WHERE m.component_id=i.component_id AND m.user_id=$2)) ORDER BY j.updated_at DESC LIMIT $3 OFFSET $4"
     );
     let items = sqlx::query_as(&q)
         .bind(pat)
-        .bind(uid)
+        .bind(allowed_user)
         .bind(p.limit())
         .bind(p.offset())
         .fetch_all(&s.db)
@@ -724,13 +733,12 @@ pub async fn search_jobs(
     Json(input): Json<JobSearchInput>,
 ) -> ApiResult<Json<Page<JobConfigView>>> {
     let pattern = format!("%{}%", input.q.trim());
-    let requested_user = input.user_id.or(Some(u.id));
     let allowed_user = (!u.is_admin).then_some(u.id);
     let domain = input.deployment_domain.trim();
     let environment_code = input.environment_code.trim().to_ascii_lowercase();
     let limit = input.page_size.clamp(1, 100);
     let offset = (input.page.max(1) - 1) * limit;
-    let where_clause = "WHERE (j.display_name ILIKE $1 OR j.job_full_name ILIKE $1) AND ($2::uuid IS NULL OR i.component_id=$2) AND ($3::uuid IS NULL OR e.customer_id=$3) AND ($4='' OR e.code=$4) AND ($5::uuid IS NULL OR j.user_id=$5) AND ($6='' OR e.deployment_domain=$6) AND ($7::uuid IS NULL OR c.is_public OR EXISTS(SELECT 1 FROM gd_component_members m WHERE m.component_id=i.component_id AND m.user_id=$7))";
+    let where_clause = "WHERE (j.display_name ILIKE $1 OR j.job_full_name ILIKE $1) AND ($2::uuid IS NULL OR i.component_id=$2) AND ($3::uuid IS NULL OR e.customer_id=$3) AND ($4='' OR e.code=$4) AND ($5='' OR e.deployment_domain=$5) AND ($6::uuid IS NULL OR i.id=$6) AND ($7::uuid IS NULL OR c.is_public OR EXISTS(SELECT 1 FROM gd_component_members m WHERE m.component_id=i.component_id AND m.user_id=$7))";
     let total_sql = format!(
         "SELECT count(*) FROM gd_job_configs j JOIN gd_component_instances i ON i.id=j.component_instance_id JOIN gd_components c ON c.id=i.component_id JOIN gd_environments e ON e.id=i.environment_id {where_clause}"
     );
@@ -739,8 +747,8 @@ pub async fn search_jobs(
         .bind(input.component_id)
         .bind(input.customer_id)
         .bind(&environment_code)
-        .bind(requested_user)
         .bind(domain)
+        .bind(input.component_instance_id)
         .bind(allowed_user)
         .fetch_one(&s.db)
         .await?;
@@ -751,8 +759,8 @@ pub async fn search_jobs(
         .bind(input.component_id)
         .bind(input.customer_id)
         .bind(environment_code)
-        .bind(requested_user)
         .bind(domain)
+        .bind(input.component_instance_id)
         .bind(allowed_user)
         .bind(limit)
         .bind(offset)
@@ -773,33 +781,76 @@ pub async fn discover_jobs(
     u: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    let inst = instance_by_id(&s, id).await?;
-    component_permission(&s.db, &u, inst.component_id, false).await?;
-    let e = environment_by_id(&s, inst.environment_id).await?;
-    let folder_url = inst.folder_url.as_deref().ok_or_else(|| {
-        ApiError::bad_request("FOLDER_URL_MISSING", "组件实例未记录 Jenkins Folder URL")
-    })?;
-    let jobs = s
-        .jenkins
-        .workflow_jobs(folder_url, e.request_timeout_seconds as u64, false)
-        .await
-        .map_err(|x| ApiError::bad_request("JENKINS_ERROR", x.to_string()))?;
+    let (jobs, _) = available_instance_jobs(&s, &u, id).await?;
     Ok(Json(json!(jobs)))
 }
 
-async fn instance_job(
+pub async fn add_manual_workflow_job(
+    State(s): State<AppState>,
+    u: CurrentUser,
+    Path(id): Path<Uuid>,
+    Json(input): Json<ManualWorkflowJobInput>,
+) -> ApiResult<Json<crate::jenkins::JenkinsItem>> {
+    let instance = instance_by_id(&s, id).await?;
+    component_permission(&s.db, &u, instance.component_id, false).await?;
+    let environment = environment_by_id(&s, instance.environment_id).await?;
+    let job_url = s
+        .jenkins
+        .validate_url(input.job_url.trim())
+        .await
+        .map_err(|error| ApiError::bad_request("INVALID_JOB_URL", error.to_string()))?;
+    let raw = s
+        .jenkins
+        .job_definition_at(
+            job_url.as_str(),
+            environment.request_timeout_seconds as u64,
+            false,
+        )
+        .await
+        .map_err(|error| ApiError::bad_request("JENKINS_ERROR", error.to_string()))?;
+    let job: crate::jenkins::JenkinsItem = serde_json::from_value(raw)
+        .map_err(|error| ApiError::bad_request("INVALID_WORKFLOW_JOB", error.to_string()))?;
+    if job.full_name.trim().is_empty()
+        || !job.class_name.to_ascii_lowercase().contains("workflowjob")
+    {
+        return Err(ApiError::bad_request(
+            "INVALID_WORKFLOW_JOB",
+            "该 URL 不是有效的 Jenkins WorkflowJob",
+        ));
+    }
+    sqlx::query("INSERT INTO gd_manual_workflow_jobs(component_instance_id,name,full_name,url,class_name,created_by) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(component_instance_id,full_name) DO UPDATE SET name=excluded.name,url=excluded.url,class_name=excluded.class_name")
+        .bind(id)
+        .bind(&job.name)
+        .bind(&job.full_name)
+        .bind(&job.url)
+        .bind(&job.class_name)
+        .bind(u.id)
+        .execute(&s.db)
+        .await?;
+    audit::record(
+        &s.db,
+        Some(u.id),
+        "ADD",
+        "MANUAL_WORKFLOW_JOB",
+        Some(id),
+        json!({"job_full_name":job.full_name,"job_url":job.url}),
+    )
+    .await;
+    Ok(Json(job))
+}
+
+async fn available_instance_jobs(
     s: &AppState,
     u: &CurrentUser,
     instance_id: Uuid,
-    full_name: &str,
-) -> ApiResult<(crate::jenkins::JenkinsItem, EnvironmentView)> {
+) -> ApiResult<(Vec<crate::jenkins::JenkinsItem>, EnvironmentView)> {
     let instance = instance_by_id(s, instance_id).await?;
     component_permission(&s.db, u, instance.component_id, false).await?;
     let environment = environment_by_id(s, instance.environment_id).await?;
     let folder_url = instance.folder_url.as_deref().ok_or_else(|| {
         ApiError::bad_request("FOLDER_URL_MISSING", "组件实例未记录 Jenkins Folder URL")
     })?;
-    let jobs = s
+    let mut jobs = s
         .jenkins
         .workflow_jobs(
             folder_url,
@@ -808,6 +859,35 @@ async fn instance_job(
         )
         .await
         .map_err(|error| ApiError::bad_request("JENKINS_ERROR", error.to_string()))?;
+    let manual = sqlx::query_as::<_, (String, String, String, String)>(
+        "SELECT name,full_name,url,class_name FROM gd_manual_workflow_jobs WHERE component_instance_id=$1 ORDER BY created_at,id",
+    )
+    .bind(instance_id)
+    .fetch_all(&s.db)
+    .await?;
+    for (name, full_name, url, class_name) in manual {
+        if jobs.iter().any(|job| job.full_name == full_name) {
+            continue;
+        }
+        jobs.push(crate::jenkins::JenkinsItem {
+            name,
+            full_name,
+            url,
+            class_name,
+            jobs: Vec::new(),
+            error: None,
+        });
+    }
+    Ok((jobs, environment))
+}
+
+async fn instance_job(
+    s: &AppState,
+    u: &CurrentUser,
+    instance_id: Uuid,
+    full_name: &str,
+) -> ApiResult<(crate::jenkins::JenkinsItem, EnvironmentView)> {
+    let (jobs, environment) = available_instance_jobs(s, u, instance_id).await?;
     let job = jobs
         .into_iter()
         .find(|job| job.full_name == full_name)
@@ -848,17 +928,43 @@ pub async fn test_instance_job(
         ));
     }
     let (job, environment) = instance_job(&s, &u, id, input.job_full_name.trim()).await?;
+    let jenkins_base = s
+        .jenkins
+        .base_url_for_job(&job.url)
+        .await
+        .map_err(|error| ApiError::bad_request("INVALID_JOB_URL", error.to_string()))?;
     let location = s
         .jenkins
         .trigger_at(
             &job.url,
-            &environment.jenkins_url,
+            &jenkins_base,
             &input.parameters,
             environment.request_timeout_seconds as u64,
             false,
         )
         .await
         .map_err(|error| ApiError::bad_request("JENKINS_ERROR", error.to_string()))?;
+    if let Some((job_config_id, definitions)) = sqlx::query_as::<_, (Uuid, Value)>(
+        "SELECT j.id,v.parameter_definitions FROM gd_job_configs j JOIN gd_job_config_versions v ON v.job_config_id=j.id AND v.version=j.current_version WHERE j.component_instance_id=$1 AND j.job_full_name=$2",
+    )
+    .bind(id)
+    .bind(&job.full_name)
+    .fetch_optional(&s.db)
+    .await?
+    {
+        let presets = s
+            .crypto
+            .encrypt_parameters(
+                &input.parameters,
+                &crate::crypto::password_names(&definitions),
+            )
+            .map_err(ApiError::Internal)?;
+        sqlx::query("UPDATE gd_job_configs SET latest_parameter_presets=$2,updated_at=now() WHERE id=$1")
+            .bind(job_config_id)
+            .bind(presets)
+            .execute(&s.db)
+            .await?;
+    }
     audit::record(
         &s.db,
         Some(u.id),
@@ -891,16 +997,22 @@ pub async fn test_instance_job_queue(
     let instance = instance_by_id(&s, id).await?;
     component_permission(&s.db, &u, instance.component_id, false).await?;
     let environment = environment_by_id(&s, instance.environment_id).await?;
-    let queue = s
-        .jenkins
-        .queue(
-            &environment.jenkins_url,
-            input.queue_id,
-            environment.request_timeout_seconds as u64,
-            false,
-        )
-        .await
-        .map_err(|error| ApiError::bad_request("JENKINS_ERROR", error.to_string()))?;
+    let queue_result = if let Some(queue_url) = input.queue_url.as_deref() {
+        s.jenkins
+            .queue_at(queue_url, environment.request_timeout_seconds as u64, false)
+            .await
+    } else {
+        s.jenkins
+            .queue(
+                &environment.jenkins_url,
+                input.queue_id,
+                environment.request_timeout_seconds as u64,
+                false,
+            )
+            .await
+    };
+    let queue =
+        queue_result.map_err(|error| ApiError::bad_request("JENKINS_ERROR", error.to_string()))?;
     Ok(Json(json!({
         "cancelled":queue.cancelled,
         "why":queue.why,
@@ -924,7 +1036,7 @@ pub async fn create_job(
         )
         .map_err(ApiError::Internal)?;
     let mut tx = s.db.begin().await?;
-    let id:Uuid=sqlx::query_scalar("INSERT INTO gd_job_configs(user_id,component_instance_id,display_name,description,job_full_name,job_url) VALUES($1,$2,$3,$4,$5,$6) RETURNING id").bind(u.id).bind(i.component_instance_id).bind(i.display_name.trim()).bind(i.description).bind(i.job_full_name.trim()).bind(i.job_url).fetch_one(&mut *tx).await?;
+    let id:Uuid=sqlx::query_scalar("INSERT INTO gd_job_configs(component_instance_id,display_name,description,job_full_name,job_url,latest_parameter_presets) VALUES($1,$2,$3,$4,$5,$6) RETURNING id").bind(i.component_instance_id).bind(i.display_name.trim()).bind(i.description).bind(i.job_full_name.trim()).bind(i.job_url).bind(&presets).fetch_one(&mut *tx).await?;
     let hash = definition_hash(&i.parameter_definitions);
     sqlx::query("INSERT INTO gd_job_config_versions(job_config_id,version,parameter_definitions,parameter_presets,definition_hash,created_by) VALUES($1,1,$2,$3,$4,$5)").bind(id).bind(i.parameter_definitions).bind(presets).bind(hash).bind(u.id).execute(&mut *tx).await?;
     tx.commit().await?;
@@ -945,7 +1057,7 @@ pub async fn update_job(
     Path(id): Path<Uuid>,
     Json(i): Json<JobInput>,
 ) -> ApiResult<Json<JobConfigView>> {
-    let _existing = job_by_id_for_user(&s, &u, id).await?;
+    let _existing = job_by_id_with_permission(&s, &u, id).await?;
     validate_definitions(&i.parameter_definitions)?;
     let presets = s
         .crypto
@@ -958,7 +1070,7 @@ pub async fn update_job(
         .version
         .ok_or_else(|| ApiError::bad_request("VERSION_REQUIRED", "缺少版本号"))?;
     let mut tx = s.db.begin().await?;
-    let next:i32=sqlx::query_scalar("UPDATE gd_job_configs SET display_name=$2,description=$3,status='ACTIVE',current_version=current_version+1,version=version+1,updated_at=now() WHERE id=$1 AND version=$4 RETURNING current_version").bind(id).bind(i.display_name.trim()).bind(i.description).bind(v).fetch_optional(&mut *tx).await?.ok_or_else(||ApiError::conflict("Job 配置已被修改"))?;
+    let next:i32=sqlx::query_scalar("UPDATE gd_job_configs SET display_name=$2,description=$3,status='ACTIVE',latest_parameter_presets=$4,current_version=current_version+1,version=version+1,updated_at=now() WHERE id=$1 AND version=$5 RETURNING current_version").bind(id).bind(i.display_name.trim()).bind(i.description).bind(&presets).bind(v).fetch_optional(&mut *tx).await?.ok_or_else(||ApiError::conflict("Job 配置已被修改"))?;
     sqlx::query("INSERT INTO gd_job_config_versions(job_config_id,version,parameter_definitions,parameter_presets,definition_hash,created_by) VALUES($1,$2,$3,$4,$5,$6)").bind(id).bind(next).bind(&i.parameter_definitions).bind(presets).bind(definition_hash(&i.parameter_definitions)).bind(u.id).execute(&mut *tx).await?;
     tx.commit().await?;
     audit::record(
@@ -977,19 +1089,24 @@ pub async fn sync_job(
     u: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    let j = job_by_id_for_user(&s, &u, id).await?;
+    let j = job_by_id_with_permission(&s, &u, id).await?;
     let inst = instance_by_id(&s, j.component_instance_id).await?;
     let e = environment_by_id(&s, inst.environment_id).await?;
-    let raw = s
-        .jenkins
-        .job_definition(
-            &e.jenkins_url,
-            &j.job_full_name,
-            e.request_timeout_seconds as u64,
-            false,
-        )
-        .await
-        .map_err(|x| ApiError::bad_request("JENKINS_ERROR", x.to_string()))?;
+    let raw = if let Some(job_url) = j.job_url.as_deref() {
+        s.jenkins
+            .job_definition_at(job_url, e.request_timeout_seconds as u64, false)
+            .await
+    } else {
+        s.jenkins
+            .job_definition(
+                &e.jenkins_url,
+                &j.job_full_name,
+                e.request_timeout_seconds as u64,
+                false,
+            )
+            .await
+    }
+    .map_err(|x| ApiError::bad_request("JENKINS_ERROR", x.to_string()))?;
     let latest = extract_parameter_definitions(&raw);
     let current = &j.parameter_definitions;
     let comparison = compare_definitions(current, &latest);
@@ -1015,14 +1132,18 @@ async fn job_by_id(s: &AppState, id: Uuid) -> ApiResult<JobConfigView> {
         .await?
         .ok_or_else(|| ApiError::not_found("Job 配置不存在"))
 }
-async fn job_by_id_for_user(s: &AppState, u: &CurrentUser, id: Uuid) -> ApiResult<JobConfigView> {
-    let q = format!("{JOB_SELECT} WHERE j.id=$1 AND ($2::uuid IS NULL OR j.user_id=$2)");
-    sqlx::query_as(&q)
+async fn job_by_id_with_permission(
+    s: &AppState,
+    u: &CurrentUser,
+    id: Uuid,
+) -> ApiResult<JobConfigView> {
+    let job: JobConfigView = sqlx::query_as(&format!("{JOB_SELECT} WHERE j.id=$1"))
         .bind(id)
-        .bind(if u.is_admin { None } else { Some(u.id) })
         .fetch_optional(&s.db)
         .await?
-        .ok_or_else(|| ApiError::not_found("Job 配置不存在"))
+        .ok_or_else(|| ApiError::not_found("Job 配置不存在"))?;
+    component_permission(&s.db, u, job.component_id, false).await?;
+    Ok(job)
 }
 
 fn valid_code(code: &str) -> ApiResult<()> {

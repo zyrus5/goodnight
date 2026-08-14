@@ -7,6 +7,7 @@ import {
   createResource,
   deleteResource,
   getPage,
+  type Page,
   type Resource,
   updateResource,
 } from "../services/api";
@@ -864,18 +865,23 @@ function ManageJobsDialog({
   const [previewing, setPreviewing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [addingManual, setAddingManual] = useState(false);
+  const [showManualInput, setShowManualInput] = useState(false);
+  const [manualJobUrl, setManualJobUrl] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
     Promise.all([
       http.get<JobItem[]>(`/component-instances/${instance.id}/jobs/discover`),
-      getPage<Resource>("/job-configs", "", 1, { page_size: 100 }),
+      http.post<Page<Resource>>("/job-configs/search", {
+        component_instance_id: instance.id,
+        page: 1,
+        page_size: 100,
+      }),
     ])
-      .then(([jobResponse, jobPage]) => {
-        const mine = jobPage.items.filter(
-          (job) => job.component_instance_id === instance.id,
-        );
+      .then(([jobResponse, jobPageResponse]) => {
+        const mine = jobPageResponse.data.items;
         const byName = Object.fromEntries(
           mine.map((job) => [String(job.job_full_name), job]),
         );
@@ -955,6 +961,32 @@ function ManageJobsDialog({
     }));
   }
 
+  async function addManualJob() {
+    const jobUrl = manualJobUrl.trim();
+    if (!jobUrl) return;
+    setAddingManual(true);
+    setError("");
+    setNotice("");
+    try {
+      const response = await http.post<JobItem>(
+        `/component-instances/${instance.id}/jobs/manual`,
+        { job_url: jobUrl },
+      );
+      setJobs((current) => [
+        ...current.filter((job) => job.fullName !== response.data.fullName),
+        response.data,
+      ]);
+      await selectJob(response.data);
+      setNotice(`已添加 WorkflowJob：${response.data.fullName}`);
+      setManualJobUrl("");
+      setShowManualInput(false);
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setAddingManual(false);
+    }
+  }
+
   async function testJob() {
     if (!selected) return;
     const popup = window.open("about:blank", "_blank");
@@ -979,6 +1011,7 @@ function ManageJobsDialog({
           executable_url?: string;
         }>(`/component-instances/${instance.id}/jobs/test/queue`, {
           queue_id: response.data.queue_id,
+          queue_url: response.data.location,
         });
         if (queue.data.cancelled) throw new Error("Jenkins 队列任务已取消");
         if (queue.data.executable_url) {
@@ -1085,10 +1118,11 @@ function ManageJobsDialog({
             <div className="job-manage-list">
               {loading ? (
                 <div className="association-empty">正在读取 Jenkins…</div>
-              ) : visibleJobs.length === 0 ? (
-                <div className="association-empty">没有匹配的 WorkflowJob</div>
               ) : (
-                visibleJobs.map((job) => (
+                <>
+                {visibleJobs.length === 0 ? (
+                  <div className="association-empty">没有匹配的 WorkflowJob</div>
+                ) : visibleJobs.map((job) => (
                   <div
                     key={job.fullName}
                     className={`job-manage-item ${selected?.fullName === job.fullName ? "selected" : ""}`}
@@ -1121,7 +1155,56 @@ function ManageJobsDialog({
                       ♥
                     </button>
                   </div>
-                ))
+                ))}
+                <button
+                  type="button"
+                  className="manual-job-add"
+                  disabled={addingManual}
+                  onClick={() => setShowManualInput(true)}
+                >
+                  <b>＋</b>
+                  <span>手动添加 WorkflowJob</span>
+                </button>
+                {showManualInput && (
+                  <div className="manual-job-entry">
+                    <label htmlFor="manual-workflow-job-url">
+                      完整的 WorkflowJob URL
+                    </label>
+                    <input
+                      id="manual-workflow-job-url"
+                      autoFocus
+                      value={manualJobUrl}
+                      disabled={addingManual}
+                      placeholder="例如：https://jenkins.example.com/job/folder/job/name/"
+                      onChange={(event) => setManualJobUrl(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") void addManualJob();
+                        if (event.key === "Escape") setShowManualInput(false);
+                      }}
+                    />
+                    <div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setManualJobUrl("");
+                          setShowManualInput(false);
+                        }}
+                        disabled={addingManual}
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={addingManual || !manualJobUrl.trim()}
+                        onClick={() => void addManualJob()}
+                      >
+                        {addingManual ? "正在读取…" : "添加"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                </>
               )}
             </div>
           </section>

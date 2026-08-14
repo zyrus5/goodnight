@@ -211,6 +211,10 @@ impl JenkinsClient {
         self.json(job_url, "api/json", timeout, invalid_certs).await
     }
 
+    pub async fn base_url_for_job(&self, job_url: &str) -> Result<String> {
+        job_base_url(self.validate_url(job_url).await?)
+    }
+
     pub async fn job_definition(
         &self,
         base: &str,
@@ -399,6 +403,16 @@ impl JenkinsClient {
         .await
     }
 
+    pub async fn queue_at(
+        &self,
+        queue_url: &str,
+        timeout: u64,
+        invalid_certs: bool,
+    ) -> Result<QueueItem> {
+        self.json(queue_url, "api/json", timeout, invalid_certs)
+            .await
+    }
+
     pub async fn build(
         &self,
         base: &str,
@@ -410,6 +424,22 @@ impl JenkinsClient {
         self.json(
             base,
             &format!("{}/{number}/api/json", job_path(full_name)),
+            timeout,
+            invalid_certs,
+        )
+        .await
+    }
+
+    pub async fn build_at(
+        &self,
+        job_url: &str,
+        number: i64,
+        timeout: u64,
+        invalid_certs: bool,
+    ) -> Result<BuildInfo> {
+        self.json(
+            job_url,
+            &format!("{number}/api/json"),
             timeout,
             invalid_certs,
         )
@@ -450,6 +480,40 @@ impl JenkinsClient {
             .headers()
             .get("X-More-Data")
             .and_then(|v| v.to_str().ok())
+            == Some("true");
+        Ok((response.text().await?, next, more))
+    }
+
+    pub async fn progressive_log_at(
+        &self,
+        job_url: &str,
+        number: i64,
+        offset: i64,
+        timeout: u64,
+        invalid_certs: bool,
+    ) -> Result<(String, i64, bool)> {
+        let response = self
+            .request(
+                Method::GET,
+                job_url,
+                &format!("{number}/logText/progressiveText?start={offset}"),
+                timeout,
+                invalid_certs,
+            )
+            .await?
+            .send()
+            .await?;
+        let response = checked(response).await?;
+        let next = response
+            .headers()
+            .get("X-Text-Size")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(offset);
+        let more = response
+            .headers()
+            .get("X-More-Data")
+            .and_then(|value| value.to_str().ok())
             == Some("true");
         Ok((response.text().await?, next, more))
     }
@@ -495,6 +559,30 @@ impl JenkinsClient {
             )
             .await?;
         if let Ok(crumb) = self.crumb(base, timeout, invalid_certs).await {
+            request = apply_crumb(request, crumb);
+        }
+        checked(request.send().await?).await?;
+        Ok(())
+    }
+
+    pub async fn stop_build_at(
+        &self,
+        job_url: &str,
+        number: i64,
+        timeout: u64,
+        invalid_certs: bool,
+    ) -> Result<()> {
+        let base = self.base_url_for_job(job_url).await?;
+        let mut request = self
+            .request(
+                Method::POST,
+                job_url,
+                &format!("{number}/stop"),
+                timeout,
+                invalid_certs,
+            )
+            .await?;
+        if let Ok(crumb) = self.crumb(&base, timeout, invalid_certs).await {
             request = apply_crumb(request, crumb);
         }
         checked(request.send().await?).await?;
@@ -587,6 +675,18 @@ fn job_path(full_name: &str) -> String {
         .join("/")
 }
 
+fn job_base_url(mut url: Url) -> Result<String> {
+    let job_marker = url
+        .path()
+        .find("/job/")
+        .context("WorkflowJob URL 缺少 /job/ 路径")?;
+    let base_path = url.path()[..=job_marker].to_owned();
+    url.set_path(&base_path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
+
 fn scalar(value: &Value) -> String {
     match value {
         Value::String(v) => v.clone(),
@@ -622,10 +722,23 @@ fn folder_items(items: Vec<JenkinsItem>) -> Vec<JenkinsItem> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Crumb, CrumbContext, JenkinsItem, apply_crumb, folder_items, job_path};
+    use super::{
+        Crumb, CrumbContext, JenkinsItem, apply_crumb, folder_items, job_base_url, job_path,
+    };
     #[test]
     fn job_names_are_encoded_by_segment() {
         assert_eq!(job_path("A folder/deploy"), "job/A%20folder/job/deploy");
+    }
+
+    #[test]
+    fn job_url_resolves_its_own_jenkins_base() {
+        assert_eq!(
+            job_base_url(
+                url::Url::parse("https://ci.example/jenkins/job/folder/job/deploy/").unwrap()
+            )
+            .unwrap(),
+            "https://ci.example/jenkins/"
+        );
     }
 
     #[test]

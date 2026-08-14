@@ -44,7 +44,7 @@ export function TaskEditorPage() {
         setScheduled(data.scheduled_at?.slice(0, 16) ?? "");
         setCron(data.cron_expression ?? "0 2 * * *");
         setTimezone(data.timezone);
-        setNodes(data.definition.nodes ?? []);
+        setNodes(normalizeLevelDependencies(data.definition.nodes ?? []));
         setVersion(data.version);
       });
   }, [id]);
@@ -90,7 +90,9 @@ export function TaskEditorPage() {
     };
   }
   function add(job: Resource, dependencies: string[] = []) {
-    setNodes((current) => [...current, nodeFor(job, dependencies)]);
+    setNodes((current) =>
+      normalizeLevelDependencies([...current, nodeFor(job, dependencies)]),
+    );
   }
   function startDrag(event: DragEvent<HTMLButtonElement>, job: Resource) {
     event.dataTransfer.effectAllowed = "copy";
@@ -107,19 +109,25 @@ export function TaskEditorPage() {
   }
   function update(key: string, patch: Partial<NodeDef>) {
     setNodes((current) =>
-      current.map((node) => (node.key === key ? { ...node, ...patch } : node)),
+      normalizeLevelDependencies(
+        current.map((node) =>
+          node.key === key ? { ...node, ...patch } : node,
+        ),
+      ),
     );
   }
   function remove(key: string) {
     setNodes((current) =>
-      current
-        .filter((node) => node.key !== key)
-        .map((node) => ({
-          ...node,
-          dependencies: node.dependencies.filter(
-            (dependency) => dependency !== key,
-          ),
-        })),
+      normalizeLevelDependencies(
+        current
+          .filter((node) => node.key !== key)
+          .map((node) => ({
+            ...node,
+            dependencies: node.dependencies.filter(
+              (dependency) => dependency !== key,
+            ),
+          })),
+      ),
     );
   }
 
@@ -168,7 +176,7 @@ export function TaskEditorPage() {
         <div>
           <p className="eyebrow">TASK DESIGNER</p>
           <h1>{id ? "编辑任务" : "创建任务"}</h1>
-          <p>同层节点并行执行；设置前置节点即可组成串行或混合流程。</p>
+          <p>同层节点并行执行；下一层会等待上一层全部成功后执行。</p>
         </div>
         <div className="actions">
           <button type="button" onClick={() => navigate("/tasks")}>
@@ -423,7 +431,7 @@ export function TaskEditorPage() {
                       )}
                       <div className="node-fields">
                         <label>
-                          前置节点（可多选）
+                          前置层节点（自动等待整层）
                           <select
                             multiple
                             value={node.dependencies}
@@ -529,6 +537,40 @@ function topologicalLevels(nodes: NodeDef[]) {
       levels.push([...remaining.values()]);
       break;
     }
+    levels.push(level);
+    for (const node of level) {
+      remaining.delete(node.key);
+      done.add(node.key);
+    }
+  }
+  return levels;
+}
+
+function normalizeLevelDependencies(nodes: NodeDef[]) {
+  const levels = topologicalLevelsStrict(nodes);
+  if (!levels) return nodes;
+  const dependencies = new Map<string, string[]>();
+  levels.forEach((level, index) => {
+    const previous = index === 0 ? [] : levels[index - 1].map((node) => node.key);
+    level.forEach((node) => dependencies.set(node.key, previous));
+  });
+  return nodes.map((node) => ({
+    ...node,
+    dependencies: dependencies.get(node.key) ?? node.dependencies,
+  }));
+}
+
+function topologicalLevelsStrict(nodes: NodeDef[]) {
+  const remaining = new Map(nodes.map((node) => [node.key, node]));
+  const done = new Set<string>();
+  const levels: NodeDef[][] = [];
+  while (remaining.size) {
+    const level = [...remaining.values()].filter((node) =>
+      node.dependencies.every(
+        (dependency) => done.has(dependency) || !remaining.has(dependency),
+      ),
+    );
+    if (!level.length) return null;
     levels.push(level);
     for (const node of level) {
       remaining.delete(node.key);

@@ -178,7 +178,6 @@ pub struct InstanceView {
 #[derive(Debug, Serialize, FromRow)]
 pub struct JobConfigView {
     pub id: Uuid,
-    pub user_id: Uuid,
     pub component_instance_id: Uuid,
     pub instance_name: String,
     pub component_id: Uuid,

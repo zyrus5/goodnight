@@ -108,7 +108,7 @@ pub async fn create(
         "INSERT INTO gd_task_versions(task_id,version,definition,created_by) VALUES($1,1,$2,$3)",
     )
     .bind(id)
-    .bind(definition)
+    .bind(&definition)
     .bind(u.id)
     .execute(&mut *tx)
     .await?;
@@ -175,7 +175,7 @@ pub async fn update(
     )
     .bind(id)
     .bind(nv)
-    .bind(definition)
+    .bind(&definition)
     .bind(u.id)
     .execute(&mut *tx)
     .await?;
@@ -446,17 +446,23 @@ pub async fn node_log(
     u: CurrentUser,
     Path((eid, nid)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<Json<Value>> {
-    let row=sqlx::query_as::<_,(String,String,i32,bool,String,Option<i64>,i64)>("SELECT e.jenkins_url,j.job_full_name,e.request_timeout_seconds,false,n.status,n.build_number,n.log_offset FROM gd_node_executions n JOIN gd_executions x ON x.id=n.execution_id JOIN gd_environments e ON e.id=n.environment_id JOIN gd_job_configs j ON j.id=n.job_config_id WHERE n.id=$1 AND n.execution_id=$2 AND ($3::uuid IS NULL OR x.user_id=$3)").bind(nid).bind(eid).bind(if u.is_admin { None } else { Some(u.id) }).fetch_optional(&s.db).await?.ok_or_else(||ApiError::not_found("节点不存在"))?;
-    let Some(number) = row.5 else {
+    let row=sqlx::query_as::<_,(String,String,Option<String>,i32,bool,String,Option<i64>,i64)>("SELECT e.jenkins_url,j.job_full_name,j.job_url,e.request_timeout_seconds,false,n.status,n.build_number,n.log_offset FROM gd_node_executions n JOIN gd_executions x ON x.id=n.execution_id JOIN gd_environments e ON e.id=n.environment_id JOIN gd_job_configs j ON j.id=n.job_config_id WHERE n.id=$1 AND n.execution_id=$2 AND ($3::uuid IS NULL OR x.user_id=$3)").bind(nid).bind(eid).bind(if u.is_admin { None } else { Some(u.id) }).fetch_optional(&s.db).await?.ok_or_else(||ApiError::not_found("节点不存在"))?;
+    let Some(number) = row.6 else {
         return Ok(Json(
-            json!({"text":"","next_offset":row.6,"more":true,"reason":"构建尚未开始"}),
+            json!({"text":"","next_offset":row.7,"more":true,"reason":"构建尚未开始"}),
         ));
     };
-    let (text, next, more) = s
-        .jenkins
-        .progressive_log(&row.0, &row.1, number, row.6, row.2 as u64, row.3)
-        .await
-        .map_err(|e| ApiError::bad_request("LOG_UNAVAILABLE", e.to_string()))?;
+    let log_result = if let Some(job_url) = row.2.as_deref() {
+        s.jenkins
+            .progressive_log_at(job_url, number, row.7, row.3 as u64, row.4)
+            .await
+    } else {
+        s.jenkins
+            .progressive_log(&row.0, &row.1, number, row.7, row.3 as u64, row.4)
+            .await
+    };
+    let (text, next, more) =
+        log_result.map_err(|e| ApiError::bad_request("LOG_UNAVAILABLE", e.to_string()))?;
     sqlx::query("UPDATE gd_node_executions SET log_offset=$2 WHERE id=$1 AND log_offset<$2")
         .bind(nid)
         .bind(next)
@@ -489,6 +495,7 @@ async fn execution_by_id(s: &AppState, u: &CurrentUser, id: Uuid) -> ApiResult<E
 }
 async fn encrypt_definition(s: &AppState, definition: &Value) -> ApiResult<Value> {
     let mut output = definition.clone();
+    normalize_level_dependencies(&mut output)?;
     let nodes = output
         .get_mut("nodes")
         .and_then(Value::as_array_mut)
@@ -504,6 +511,73 @@ async fn encrypt_definition(s: &AppState, definition: &Value) -> ApiResult<Value
         }
     }
     Ok(output)
+}
+
+pub(crate) fn normalize_level_dependencies(definition: &mut Value) -> ApiResult<()> {
+    let nodes = definition
+        .get_mut("nodes")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| ApiError::bad_request("EMPTY_TASK", "任务没有节点"))?;
+    let node_data = nodes
+        .iter()
+        .map(|node| {
+            let key = node
+                .get("key")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let dependencies = node
+                .get("dependencies")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            (key, dependencies)
+        })
+        .collect::<Vec<_>>();
+    let known_keys = node_data
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<HashSet<_>>();
+    let mut remaining = (0..node_data.len()).collect::<HashSet<_>>();
+    let mut completed = HashSet::<String>::new();
+    let mut levels = Vec::<Vec<usize>>::new();
+    while !remaining.is_empty() {
+        let mut level = remaining
+            .iter()
+            .copied()
+            .filter(|index| {
+                node_data[*index].1.iter().all(|dependency| {
+                    completed.contains(dependency) || !known_keys.contains(dependency.as_str())
+                })
+            })
+            .collect::<Vec<_>>();
+        if level.is_empty() {
+            return Err(ApiError::bad_request("DAG_CYCLE", "任务编排存在循环依赖"));
+        }
+        level.sort_unstable();
+        for index in &level {
+            remaining.remove(index);
+            completed.insert(node_data[*index].0.clone());
+        }
+        levels.push(level);
+    }
+    for (level_index, level) in levels.iter().enumerate() {
+        let dependencies = if level_index == 0 {
+            Vec::new()
+        } else {
+            levels[level_index - 1]
+                .iter()
+                .map(|index| node_data[*index].0.clone())
+                .collect::<Vec<_>>()
+        };
+        for index in level {
+            nodes[*index]["dependencies"] = json!(dependencies);
+        }
+    }
+    Ok(())
 }
 async fn validate_task(s: &AppState, u: &CurrentUser, i: &TaskInput) -> ApiResult<()> {
     if i.name.trim().is_empty() || i.name.len() > 200 {
@@ -703,11 +777,24 @@ fn clear_encrypted(value: &mut Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_times, validate_dag};
+    use super::{next_times, normalize_level_dependencies, validate_dag};
     use serde_json::json;
     #[test]
     fn rejects_cycles() {
         assert!(validate_dag(&json!({"nodes":[{"key":"a","dependencies":["b"]},{"key":"b","dependencies":["a"]}]})).is_err());
+    }
+    #[test]
+    fn every_node_waits_for_the_entire_previous_level() {
+        let mut definition = json!({"nodes":[
+            {"key":"build-a","dependencies":[]},
+            {"key":"build-b","dependencies":[]},
+            {"key":"deploy","dependencies":["build-a"]}
+        ]});
+        normalize_level_dependencies(&mut definition).unwrap();
+        assert_eq!(
+            definition["nodes"][2]["dependencies"],
+            json!(["build-a", "build-b"])
+        );
     }
     #[test]
     fn cron_has_five_future_values() {
